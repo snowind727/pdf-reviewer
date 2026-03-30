@@ -190,7 +190,7 @@ function normalizeWs(s: string): string {
 function tryIssueTextRange(plain: string, excerpt: string, range: TextRange): [number, number] | null {
   const ex = excerpt.trim();
   if (!ex) return null;
-  let start = Math.max(0, Math.min(plain.length, Math.floor(range.start)));
+  const start = Math.max(0, Math.min(plain.length, Math.floor(range.start)));
   let end = Math.max(0, Math.min(plain.length, Math.floor(range.end)));
   if (start >= end) return null;
   [, end] = trimRangeEnd(plain, start, end);

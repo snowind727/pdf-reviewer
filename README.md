@@ -6,7 +6,7 @@
 
 1. **配置 MiniMax（本地推荐）**  
    复制 `minimax.local.example.json` 为 **`minimax.local.json`**（该文件已加入 `.gitignore`，不会进 Git），填写 `apiKey`。可选字段：`anthropicBase`、`model`、`anthropicVersion`。  
-   默认 `anthropicBase` 为国内文档中的 **`https://api.minimaxi.com/anthropic`**，与 [Anthropic API 兼容](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api) 一致。
+   默认 `anthropicBase` 为国内文档中的 **`https://api.minimaxi.com/anthropic`**，与 [Anthropic API 兼容](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api) 一致。`model` 建议使用该兼容接口支持的模型（默认 `MiniMax-M2.7`）。
 
 2. **或改用环境变量（可选）**  
    环境变量优先级高于 `minimax.local.json`：`MINIMAX_API_KEY`、`MINIMAX_ANTHROPIC_BASE`、`MINIMAX_MODEL`、`ANTHROPIC_VERSION`。参见 `.env.example`。

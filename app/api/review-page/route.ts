@@ -6,10 +6,24 @@ import { EDITOR_PUBLISHING_SPEC } from "@/lib/editor-spec";
 
 /** 国内文档默认基址：https://platform.minimaxi.com/docs/api-reference/text-anthropic-api */
 const DEFAULT_ANTHROPIC_BASE = "https://api.minimaxi.com/anthropic";
+const DEFAULT_MODEL = "MiniMax-M2.7";
+const SUPPORTED_ANTHROPIC_MODELS = new Set([
+  "MiniMax-M2.7",
+  "MiniMax-M2.7-highspeed",
+  "MiniMax-M2.5",
+  "MiniMax-M2.5-highspeed",
+  "MiniMax-M2.1",
+  "MiniMax-M2.1-highspeed",
+  "MiniMax-M2",
+]);
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
+const reviewModeSchema = z.enum(["precise", "discover-more"]);
 
 const bodySchema = z.object({
   pageIndex: z.number().int().nonnegative(),
   text: z.string().max(50000),
+  mode: reviewModeSchema.optional(),
 });
 
 /** 任务指令 + JSON 输出格式（与编辑规范拼接组成完整 system prompt） */
@@ -33,11 +47,42 @@ const TASK_INSTRUCTIONS = `
 
 字段说明：
 - excerpt 越短越好，且须与页面文本逐字一致（忽略换行）。程序会用 excerpt 在 PDF 文本层中搜索并高亮对应位置。扫描件常见 l/| 混淆时，可写你看到的字形；程序会尝试少量等价字形匹配。
+- excerpt 必须是从「页面文本」中直接复制出的原文，不能脑补、不能纠正错别字后再填写、不能把「地」改成「的」或把原文没有的字补进去。例如原文是「并诚挚地欢迎」，excerpt 不能写成「诚挚的欢迎」。
 - kind 必填：error 表示确定错误（严重/明确）；suspected 表示疑似错误（不确定、需人工复核）。
 - suggestion 必填：给用户可直接执行的修改建议；删除类务必写「删除字符：具体字符/串」，程序会在摘录匹配到的区间内只标该片段，避免整段被圈红。
 若无问题，返回 {"issues":[]}。`;
 
-const SYSTEM = `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}`;
+const REVIEW_MODE_CONFIG = {
+  precise: {
+    label: "精确查找",
+    temperature: 0.2,
+    extraInstructions: `
+---
+
+审稿模式：精确查找
+- 保持保守，只返回必要的确定错误
+- 对 suspected 项提高门槛；只有当疑点比较明确、确实值得人工复核时才返回
+- 不要为了“覆盖更多问题”而勉强输出疑似项
+- 若某条问题把握不足，宁可不报，也不要凑数`,
+  },
+  "discover-more": {
+    label: "发现更多",
+    temperature: 0.45,
+    extraInstructions: `
+---
+
+审稿模式：发现更多
+- 在保证基本合理的前提下，除必要的确定错误外，尽可能多发现值得人工复核的 suspected 项
+- 对存在一定依据、但仍需人工确认的用法、统一性、措辞、格式、术语、标点问题，可更积极地标为 suspected
+- 可以比默认模式返回更多 suspected，但不要编造原文中不存在的问题`,
+  },
+} as const;
+
+type ReviewMode = keyof typeof REVIEW_MODE_CONFIG;
+
+function buildSystemPrompt(mode: ReviewMode): string {
+  return `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}`;
+}
 
 /** Anthropic Messages API 响应（MiniMax 兼容层，非流式） */
 type AnthropicContentBlock =
@@ -46,6 +91,9 @@ type AnthropicContentBlock =
 
 type AnthropicMessagesResponse = {
   content?: AnthropicContentBlock[];
+  type?: string;
+  message?: string;
+  request_id?: string;
   error?: { type?: string; message?: string };
 };
 
@@ -58,6 +106,27 @@ function extractTextFromAnthropicMessage(data: AnthropicMessagesResponse): strin
     )
     .map((b) => b.text)
     .join("");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseMiniMaxErrorCode(data: AnthropicMessagesResponse | null, responseText: string): string | null {
+  const haystack = [data?.error?.message, data?.message, responseText]
+    .filter((x): x is string => typeof x === "string" && x.length > 0)
+    .join(" ");
+  const matched = haystack.match(/\((\d+)\)/);
+  return matched?.[1] ?? null;
+}
+
+function isRetryableFailure(
+  status: number,
+  data: AnthropicMessagesResponse | null,
+  responseText: string,
+): boolean {
+  const errorCode = parseMiniMaxErrorCode(data, responseText);
+  return RETRYABLE_STATUS.has(status) || (errorCode ? RETRYABLE_ERROR_CODES.has(errorCode) : false);
 }
 
 export async function POST(req: Request) {
@@ -76,7 +145,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const { pageIndex, text } = parsed.data;
+  const { text, mode = "precise" } = parsed.data;
 
   const local = readMinimaxLocalConfig();
   const apiKey =
@@ -88,14 +157,26 @@ export async function POST(req: Request) {
     local.anthropicBase ||
     DEFAULT_ANTHROPIC_BASE
   ).replace(/\/$/, "");
-  const model =
+  const configuredModel =
     process.env.MINIMAX_MODEL?.trim() ||
     local.model ||
-    "MiniMax-M2.1";
+    DEFAULT_MODEL;
+  const model = SUPPORTED_ANTHROPIC_MODELS.has(configuredModel)
+    ? configuredModel
+    : DEFAULT_MODEL;
   const anthropicVersion =
     process.env.ANTHROPIC_VERSION?.trim() ||
     local.anthropicVersion ||
     "2023-06-01";
+
+  if (configuredModel !== model) {
+    console.log(
+      `[review-page] 配置模型 ${configuredModel} 不在 Anthropic 兼容接口支持列表内，已自动回退到 ${model}`,
+    );
+  }
+
+  const systemPrompt = buildSystemPrompt(mode);
+  const temperature = REVIEW_MODE_CONFIG[mode].temperature;
 
   if (!apiKey) {
     return NextResponse.json(
@@ -121,8 +202,8 @@ export async function POST(req: Request) {
   const anthropicBody = {
     model,
     max_tokens: 8192,
-    temperature: 0.2,
-    system: SYSTEM,
+    temperature,
+    system: systemPrompt,
     messages: [
       {
         role: "user",
@@ -136,11 +217,13 @@ export async function POST(req: Request) {
   console.log("[review-page] ========== AI 请求开始 ==========");
   console.log("[review-page] URL:", url);
   console.log("[review-page] Model:", model);
+  console.log("[review-page] Review mode:", REVIEW_MODE_CONFIG[mode].label, `(${mode})`);
+  console.log("[review-page] Temperature:", temperature);
   console.log("[review-page] anthropic-version:", anthropicVersion);
   console.log("[review-page] API Key (前6/后4):", apiKey.slice(0, 6) + "…" + apiKey.slice(-4));
   console.log("[review-page] Request body 总长:", bodyStr.length, "字符");
   console.log("[review-page] ---------- System Prompt ----------");
-  console.log(SYSTEM);
+  console.log(systemPrompt);
   console.log("[review-page] ---------- User Message ----------");
   console.log(userContent);
   console.log("[review-page] ---------- 提示词结束 ----------");
@@ -148,28 +231,64 @@ export async function POST(req: Request) {
   const TIMEOUT_MS = 120_000;
 
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": anthropicVersion,
-      },
-      body: bodyStr,
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    const MAX_ATTEMPTS = 3;
+    let responseText = "";
+    let data: AnthropicMessagesResponse | null = null;
+    let status = 500;
 
-    const responseText = await res.text();
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": anthropicVersion,
+        },
+        body: bodyStr,
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
 
-    console.log("[review-page] ---------- AI 响应 ----------");
-    console.log("[review-page] HTTP 状态:", res.status, " 响应长度:", responseText.length, "字符");
-    console.log("[review-page] 响应原文:");
-    console.log(responseText);
+      status = res.status;
+      responseText = await res.text();
 
-    let data: AnthropicMessagesResponse & { message?: string };
-    try {
-      data = JSON.parse(responseText) as typeof data;
-    } catch {
+      console.log("[review-page] ---------- AI 响应 ----------");
+      console.log("[review-page] HTTP 状态:", res.status, " 响应长度:", responseText.length, "字符");
+      console.log("[review-page] 响应原文:");
+      console.log(responseText);
+
+      try {
+        data = JSON.parse(responseText) as AnthropicMessagesResponse;
+      } catch {
+        data = null;
+      }
+
+      if (res.ok) break;
+
+      if (attempt < MAX_ATTEMPTS && isRetryableFailure(res.status, data, responseText)) {
+        const requestId = data?.request_id ?? "unknown";
+        console.log(
+          `[review-page] 上游瞬时错误，准备第 ${attempt + 1}/${MAX_ATTEMPTS} 次重试；request_id=${requestId}`,
+        );
+        await sleep(500 * attempt);
+        continue;
+      }
+
+      const detail =
+        data?.error?.message ??
+        data?.message ??
+        responseText.slice(0, 500);
+      return NextResponse.json(
+        {
+          error: "模型接口错误",
+          status: res.status,
+          detail,
+          requestId: data?.request_id,
+        },
+        { status: 502 }
+      );
+    }
+
+    if (!data) {
       return NextResponse.json(
         {
           error: "模型返回非 JSON",
@@ -179,16 +298,14 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!res.ok) {
-      const fromError = data.error?.message;
-      const fromTop =
-        typeof data.message === "string" ? data.message : undefined;
-      const detail =
-        fromError ??
-        fromTop ??
-        JSON.stringify(data).slice(0, 500);
+    if (status < 200 || status >= 300) {
       return NextResponse.json(
-        { error: "模型接口错误", status: res.status, detail },
+        {
+          error: "模型接口错误",
+          status,
+          detail: data.error?.message ?? data.message ?? JSON.stringify(data).slice(0, 500),
+          requestId: data.request_id,
+        },
         { status: 502 }
       );
     }

@@ -34,6 +34,7 @@ import {
 /* ------------------------------------------------------------------ */
 
 type ScreenAnnotation = Annotation & { rects: ScreenRect[] };
+type ReviewMode = "precise" | "discover-more";
 
 function highlightBgClass(kind: IssueKind): string {
   return kind === "error" ? "bg-red-500/35" : "bg-sky-400/30";
@@ -41,6 +42,17 @@ function highlightBgClass(kind: IssueKind): string {
 
 function connectorColor(kind: IssueKind): string {
   return kind === "error" ? "#ef4444" : "#38bdf8";
+}
+
+function DisclosureSummary({ label }: { label: string }) {
+  return (
+    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-neutral-600 marker:hidden dark:text-neutral-400">
+      <span>{label}</span>
+      <span className="text-[11px] text-neutral-400 transition-transform duration-150 group-open:rotate-180 dark:text-neutral-500">
+        v
+      </span>
+    </summary>
+  );
 }
 
 let _nextId = 0;
@@ -78,6 +90,7 @@ export default function PdfReviewer() {
 
   const [numPages, setNumPages] = useState(0);
   const [pageNumber, setPageNumber] = useState(1);
+  const [pageJumpInput, setPageJumpInput] = useState("1");
   const [scale, setScale] = useState(1.2);
 
   const [pageSize, setPageSize] = useState({ w: 0, h: 0 });
@@ -90,8 +103,16 @@ export default function PdfReviewer() {
   const [screenAnnotations, setScreenAnnotations] = useState<ScreenAnnotation[]>([]);
 
   const [loadingAi, setLoadingAi] = useState(false);
+  const [reviewMode, setReviewMode] = useState<ReviewMode>("precise");
+  const [batchReviewCount, setBatchReviewCount] = useState(3);
+  const [batchReviewProgress, setBatchReviewProgress] = useState<{
+    done: number;
+    total: number;
+    currentPage: number;
+  } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   /* --- Editing state ---------------------------------------------- */
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -114,17 +135,15 @@ export default function PdfReviewer() {
     text: string;
   } | null>(null);
 
-  /* --- Manual add form -------------------------------------------- */
-  const [addingAnnotation, setAddingAnnotation] = useState<{
+  /* --- Selection-triggered AI annotation -------------------------- */
+  const [creatingSelectionAnnotation, setCreatingSelectionAnnotation] = useState<{
     excerpt: string;
     charRange: [number, number];
   } | null>(null);
-  const [addForm, setAddForm] = useState({
-    kind: "error" as IssueKind,
-    suggestion: "",
-    reason: "",
-  });
-  const [loadingAiSuggestion, setLoadingAiSuggestion] = useState(false);
+  const [copySelectionFeedback, setCopySelectionFeedback] = useState(false);
+  const [bingSearchText, setBingSearchText] = useState("");
+  const [speechSearchText, setSpeechSearchText] = useState("");
+  const [helpOpen, setHelpOpen] = useState(false);
 
   /* --- Connector line refs ---------------------------------------- */
   const mainAreaRef = useRef<HTMLDivElement>(null);
@@ -159,6 +178,7 @@ export default function PdfReviewer() {
     async (file: File | null) => {
       setError(null);
       setDocError(null);
+      setNotice(null);
       setPageAnnotations({});
       pageFlatTextRef.current = {};
       setScreenAnnotations([]);
@@ -166,9 +186,11 @@ export default function PdfReviewer() {
       setLiveSelectionRange(null);
       setSelectionBox(null);
       setSelectionPopup(null);
-      setAddingAnnotation(null);
+      setCreatingSelectionAnnotation(null);
+      setSpeechSearchText("");
       setEditingId(null);
       setPageNumber(1);
+      setPageJumpInput("1");
       setPageSize({ w: 0, h: 0 });
       setPdfDoc(null);
       setNumPages(0);
@@ -224,6 +246,10 @@ export default function PdfReviewer() {
     };
   }, [fileUrl, pdfjsLib]);
 
+  useEffect(() => {
+    setPageJumpInput(String(pageNumber));
+  }, [pageNumber]);
+
   /* --- Render canvas + text layer --------------------------------- */
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current) return;
@@ -234,6 +260,7 @@ export default function PdfReviewer() {
 
     let revoked = false;
     let tlInstance: TextLayerInstance | null = null;
+    const textLayerDiv = textLayerRef.current;
 
     void (async () => {
       try {
@@ -249,7 +276,6 @@ export default function PdfReviewer() {
         if (revoked) return;
         setPageSize({ w: viewport.width, h: viewport.height });
 
-        const textLayerDiv = textLayerRef.current;
         if (textLayerDiv && pdfjsLib?.TextLayer) {
           textLayerDiv.innerHTML = "";
           const tc = await page.getTextContent();
@@ -275,7 +301,7 @@ export default function PdfReviewer() {
       } catch {
         /* already done */
       }
-      if (textLayerRef.current) textLayerRef.current.innerHTML = "";
+      if (textLayerDiv) textLayerDiv.innerHTML = "";
     };
   }, [pdfDoc, pageNumber, scale, pdfjsLib]);
 
@@ -385,6 +411,20 @@ export default function PdfReviewer() {
       text: (pageFlatTextRef.current[pageNumber] ?? "").slice(range[0], range[1]),
     };
   }, [pageNumber]);
+
+  const loadPageText = useCallback(async (targetPageNumber: number) => {
+    const doc = pdfDoc;
+    if (!doc) throw new Error("PDF 尚未加载完成");
+
+    const page = await doc.getPage(targetPageNumber);
+    const tc = await page.getTextContent();
+    const items = getPageTextItems(tc.items as unknown[]);
+    const flatText = items.map((i) => i.str).join("");
+    const formattedText = buildFormattedPageText(items);
+
+    pageFlatTextRef.current[targetPageNumber] = flatText;
+    return { flatText, formattedText };
+  }, [pdfDoc]);
 
   /* --- Text selection on PDF (rectangle marquee) ------------------- */
   useEffect(() => {
@@ -579,51 +619,25 @@ export default function PdfReviewer() {
     setEditDraft(null);
   }, []);
 
-  const openAddForm = useCallback(() => {
+  const createAnnotationFromSelection = useCallback(async () => {
     if (!selectionPopup) return;
-    setAddingAnnotation({
+    const pending = {
       excerpt: selectionPopup.text,
       charRange: selectionPopup.charRange,
-    });
-    setAddForm({ kind: "error", suggestion: "", reason: "" });
+    };
+    setCreatingSelectionAnnotation(pending);
     setSelectionPopup(null);
     setLiveSelectionRange(null);
     setSelectionBox(null);
-  }, [selectionPopup]);
-
-  const confirmAdd = useCallback(() => {
-    if (!addingAnnotation) return;
-    const newAnn: Annotation = {
-      id: genId(),
-      source: "manual",
-      excerpt: addingAnnotation.excerpt,
-      kind: addForm.kind,
-      suggestion: addForm.suggestion,
-      reason: addForm.reason,
-      charRange: addingAnnotation.charRange,
-    };
-    setPageAnnotations((prev) => ({
-      ...prev,
-      [pageNumber]: [...(prev[pageNumber] ?? []), newAnn],
-    }));
-    setAddingAnnotation(null);
-  }, [addingAnnotation, addForm, pageNumber]);
-
-  const askAiForSuggestion = useCallback(async () => {
-    if (!addingAnnotation || !pdfDoc) return;
-    setLoadingAiSuggestion(true);
     setError(null);
+    setNotice(null);
     try {
-      const page = await pdfDoc.getPage(pageNumber);
-      const tc = await page.getTextContent();
-      const items = getPageTextItems(tc.items as unknown[]);
-      const formattedText = buildFormattedPageText(items);
-
+      const { formattedText } = await loadPageText(pageNumber);
       const res = await fetch("/api/suggest-edit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          excerpt: addingAnnotation.excerpt,
+          excerpt: pending.excerpt,
           pageText: formattedText.slice(0, 48000),
         }),
       });
@@ -633,50 +647,82 @@ export default function PdfReviewer() {
         return;
       }
 
-      setAddForm((prev) => ({
+      const newAnn: Annotation = {
+        id: genId(),
+        source: "selection-ai",
+        excerpt: pending.excerpt,
+        kind: (data.kind as IssueKind) ?? "suspected",
+        suggestion: typeof data.suggestion === "string" ? data.suggestion : "",
+        reason: typeof data.reason === "string" ? data.reason : "",
+        charRange: pending.charRange,
+      };
+
+      setPageAnnotations((prev) => ({
         ...prev,
-        kind: (data.kind as IssueKind) ?? prev.kind,
-        suggestion: typeof data.suggestion === "string" ? data.suggestion : prev.suggestion,
-        reason: typeof data.reason === "string" ? data.reason : prev.reason,
+        [pageNumber]: [...(prev[pageNumber] ?? []), newAnn],
       }));
     } catch (e) {
       setError(e instanceof Error ? e.message : "AI 建议请求失败");
     } finally {
-      setLoadingAiSuggestion(false);
+      setCreatingSelectionAnnotation(null);
     }
-  }, [addingAnnotation, pdfDoc, pageNumber]);
+  }, [loadPageText, pageNumber, selectionPopup]);
+
+  const copySelectionText = useCallback(async () => {
+    if (!selectionPopup?.text) return;
+    try {
+      await navigator.clipboard.writeText(selectionPopup.text);
+      setCopySelectionFeedback(true);
+      window.setTimeout(() => setCopySelectionFeedback(false), 1200);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "复制文本失败");
+    }
+  }, [selectionPopup]);
+
+  const openSpeechDatabaseSearch = useCallback(() => {
+    const keywords = speechSearchText.trim();
+    if (!keywords) return;
+    const url = `https://jhsjk.people.cn/result?keywords=${encodeURIComponent(keywords)}&isFuzzy=0`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }, [speechSearchText]);
+
+  const openBingSearch = useCallback(() => {
+    const keywords = bingSearchText.trim();
+    if (!keywords) return;
+    const url = `https://www.bing.com/?mkt=zh-CN&q=${encodeURIComponent(keywords)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }, [bingSearchText]);
 
   /* --- AI review -------------------------------------------------- */
-  const runAiReview = useCallback(async () => {
-    const doc = pdfDoc;
-    if (!doc) return;
-    setError(null);
-    setLoadingAi(true);
-    try {
-      const page = await doc.getPage(pageNumber);
-      const tc = await page.getTextContent();
-      const items = getPageTextItems(tc.items as unknown[]);
-      const flatText = items.map((i) => i.str).join("");
-      const formattedText = buildFormattedPageText(items);
+  const reviewSinglePage = useCallback(async (targetPageNumber: number, mode: ReviewMode) => {
+    const { flatText, formattedText } = await loadPageText(targetPageNumber);
 
-      pageFlatTextRef.current[pageNumber] = flatText;
+    const res = await fetch("/api/review-page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pageIndex: targetPageNumber - 1,
+        text: formattedText.slice(0, 48000),
+        mode,
+      }),
+    });
 
-      const res = await fetch("/api/review-page", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pageIndex: pageNumber - 1, text: formattedText.slice(0, 48000) }),
-      });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error ?? `第 ${targetPageNumber} 页审稿请求失败`);
+    }
 
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error ?? "审稿请求失败");
-        return;
+    const issues = (data.issues ?? []) as NormalizedReviewIssue[];
+    const matches = matchIssuesToCharRanges(flatText, issues);
+    const aiAnnotations: Annotation[] = [];
+    let droppedCount = 0;
+
+    for (const m of matches) {
+      if (!m.charRange) {
+        droppedCount += 1;
+        continue;
       }
-
-      const issues = (data.issues ?? []) as NormalizedReviewIssue[];
-      const matches = matchIssuesToCharRanges(flatText, issues);
-
-      const aiAnnotations: Annotation[] = matches.map((m) => ({
+      aiAnnotations.push({
         id: genId(),
         source: "ai" as const,
         excerpt: m.excerpt,
@@ -684,19 +730,72 @@ export default function PdfReviewer() {
         suggestion: m.suggestion ?? "",
         reason: m.reason,
         charRange: m.charRange,
-      }));
-
-      setPageAnnotations((prev) => {
-        const existing = prev[pageNumber] ?? [];
-        const manualOnly = existing.filter((a) => a.source === "manual");
-        return { ...prev, [pageNumber]: [...aiAnnotations, ...manualOnly] };
       });
+    }
+
+    setPageAnnotations((prev) => {
+      const existing = prev[targetPageNumber] ?? [];
+      const preserved = existing.filter((a) => a.source !== "ai");
+      return { ...prev, [targetPageNumber]: [...aiAnnotations, ...preserved] };
+    });
+    return { droppedCount };
+  }, [loadPageText]);
+
+  const runAiReview = useCallback(async () => {
+    if (!pdfDoc) return;
+    setError(null);
+    setNotice(null);
+    setLoadingAi(true);
+    try {
+      const { droppedCount } = await reviewSinglePage(pageNumber, reviewMode);
+      if (droppedCount > 0) {
+        setNotice(`AI 返回了 ${droppedCount} 条无法与当前页原文对齐的批注，已自动忽略。`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "审稿失败");
     } finally {
       setLoadingAi(false);
     }
-  }, [pdfDoc, pageNumber]);
+  }, [pageNumber, pdfDoc, reviewMode, reviewSinglePage]);
+
+  const runBatchAiReview = useCallback(async () => {
+    if (!pdfDoc) return;
+    const startPage = pageNumber;
+    const total = Math.min(10, Math.max(1, numPages - startPage + 1), Math.max(1, batchReviewCount));
+    if (total <= 1) return;
+
+    setError(null);
+    setNotice(null);
+    setBatchReviewProgress({ done: 0, total, currentPage: startPage });
+    let totalDroppedCount = 0;
+    const failedPages: number[] = [];
+    try {
+      for (let offset = 0; offset < total; offset += 1) {
+        const targetPageNumber = startPage + offset;
+        setBatchReviewProgress({ done: offset, total, currentPage: targetPageNumber });
+        try {
+          const { droppedCount } = await reviewSinglePage(targetPageNumber, reviewMode);
+          totalDroppedCount += droppedCount;
+        } catch (e) {
+          failedPages.push(targetPageNumber);
+          console.error(`[batch-review] 第 ${targetPageNumber} 页审稿失败:`, e);
+        }
+      }
+      setBatchReviewProgress({ done: total, total, currentPage: startPage + total - 1 });
+      const notices: string[] = [];
+      if (totalDroppedCount > 0) {
+        notices.push(`连续审稿中有 ${totalDroppedCount} 条批注无法与原文对齐，已自动忽略。`);
+      }
+      if (failedPages.length > 0) {
+        notices.push(`以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`);
+      }
+      if (notices.length > 0) {
+        setNotice(notices.join(" "));
+      }
+    } finally {
+      setBatchReviewProgress(null);
+    }
+  }, [batchReviewCount, numPages, pageNumber, pdfDoc, reviewMode, reviewSinglePage]);
 
   /* --- Ensure flatText is loaded for current page ------------------- */
   useEffect(() => {
@@ -771,54 +870,122 @@ export default function PdfReviewer() {
   }, [pageAnnotations, pdfDoc]);
 
   const hasAnyAnnotations = Object.values(pageAnnotations).some((a) => a && a.length > 0);
+  const maxBatchPages = Math.min(10, Math.max(0, numPages - pageNumber + 1));
+  const aiBusy = loadingAi || !!batchReviewProgress;
+  const jumpToPage = useCallback(() => {
+    const parsed = Number(pageJumpInput.trim());
+    if (!Number.isFinite(parsed)) {
+      setPageJumpInput(String(pageNumber));
+      return;
+    }
+    const target = Math.min(numPages || 1, Math.max(1, Math.floor(parsed)));
+    setPageNumber(target);
+    setPageJumpInput(String(target));
+  }, [numPages, pageJumpInput, pageNumber]);
 
   /* --- Render ----------------------------------------------------- */
   return (
-    <div className="mx-auto flex max-w-[1400px] flex-col gap-4">
+    <div className="mx-auto flex max-w-[1480px] flex-col gap-5 px-4 pb-8 pt-2">
       {/* Header */}
-      <header className="flex flex-col gap-2 border-b border-neutral-200 pb-4 dark:border-neutral-800">
-        <h1 className="text-xl font-semibold tracking-tight">PDF AI 审稿</h1>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          上传 PDF，逐页浏览后点击「AI 审稿」；可选中 PDF 文字手动添加批注；导出 PDF 含高亮标注与批注。
-        </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="cursor-pointer rounded-md bg-neutral-900 px-3 py-2 text-sm text-white dark:bg-neutral-100 dark:text-neutral-900">
-            选择 PDF
-            <input
-              type="file"
-              accept="application/pdf,.pdf"
-              className="hidden"
-              onChange={(e) => void onFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
-          {fileUrl && pdfDoc && (
-            <>
+      <header className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">PDF AI 审稿</h1>
+          <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
+            上传 PDF，支持当前页单页审稿，也支持从当前页起连续审稿最多 10 页；还可选中 PDF 文字后直接调用 AI 添加批注；导出 PDF 含高亮标注与批注。
+          </p>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[auto_1fr_auto]">
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-neutral-900">
+            <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-neutral-500 dark:text-neutral-400">文件</div>
+            <label className="inline-flex cursor-pointer items-center rounded-xl bg-neutral-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-950 dark:hover:bg-white">
+              选择 PDF
+              <input
+                type="file"
+                accept="application/pdf,.pdf"
+                className="hidden"
+                onChange={(e) => void onFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+          </div>
+
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-neutral-900">
+            <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-neutral-500 dark:text-neutral-400">审稿</div>
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                disabled={loadingAi}
+                disabled={aiBusy || !pdfDoc}
                 onClick={() => void runAiReview()}
-                className="rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="rounded-xl bg-amber-500 px-4 py-3 text-sm font-medium text-white transition hover:bg-amber-600 disabled:opacity-50"
               >
                 {loadingAi ? "审稿中…" : "AI 审稿（当前页）"}
               </button>
+              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
+                <span>审稿模式</span>
+                <select
+                  value={reviewMode}
+                  disabled={aiBusy || !pdfDoc}
+                  onChange={(e) => setReviewMode(e.target.value as ReviewMode)}
+                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                >
+                  <option value="precise">精确查找</option>
+                  <option value="discover-more">发现更多</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
+                <span>连续审核</span>
+                <select
+                  value={Math.min(batchReviewCount, Math.max(2, maxBatchPages))}
+                  disabled={aiBusy || maxBatchPages < 2}
+                  onChange={(e) => setBatchReviewCount(Number(e.target.value))}
+                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                >
+                  {Array.from({ length: Math.max(0, maxBatchPages - 1) }, (_, i) => i + 2).map((count) => (
+                    <option key={count} value={count}>
+                      {count} 页
+                    </option>
+                  ))}
+                </select>
+              </div>
               <button
                 type="button"
-                disabled={exporting || !hasAnyAnnotations}
-                onClick={() => void downloadPdf()}
-                className="rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-600 disabled:opacity-50"
+                disabled={aiBusy || maxBatchPages < 2}
+                onClick={() => void runBatchAiReview()}
+                className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-medium text-white transition hover:bg-orange-600 disabled:opacity-50"
               >
-                {exporting ? "导出中…" : "下载标注 PDF"}
+                {batchReviewProgress
+                  ? `连续审稿中… ${batchReviewProgress.done}/${batchReviewProgress.total}`
+                  : "AI 审稿（从当前页起）"}
               </button>
-            </>
-          )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-neutral-900">
+            <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-neutral-500 dark:text-neutral-400">导出</div>
+            <button
+              type="button"
+              disabled={exporting || !hasAnyAnnotations}
+              onClick={() => void downloadPdf()}
+              className="rounded-xl border border-neutral-300 bg-white px-4 py-3 text-sm font-medium text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:bg-neutral-900 disabled:opacity-50"
+            >
+              {exporting ? "导出中…" : "下载标注 PDF"}
+            </button>
+          </div>
         </div>
-        {pdfjsError && <p className="text-sm text-red-600 dark:text-red-400">{pdfjsError}</p>}
-        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+        {batchReviewProgress && (
+          <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">
+            正在连续审核第 {batchReviewProgress.currentPage} 页，已完成 {batchReviewProgress.done} / {batchReviewProgress.total} 页。
+          </p>
+        )}
+        {notice && <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">{notice}</p>}
+        {pdfjsError && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{pdfjsError}</p>}
+        {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
       </header>
 
       {/* Main */}
       {fileUrl && (
-        <div ref={mainAreaRef} className="relative flex flex-1 flex-col gap-4 lg:flex-row">
+        <div ref={mainAreaRef} className="relative grid flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)_400px]">
           {/* SVG connector lines */}
           {connectorLines.length > 0 && (
             <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full overflow-visible">
@@ -836,30 +1003,158 @@ export default function PdfReviewer() {
             </svg>
           )}
 
-          {/* PDF canvas + overlays */}
-          <div className="flex min-w-0 flex-1 flex-col gap-3">
-            <div className="flex flex-wrap items-center gap-2 text-sm">
+          {helpOpen && (
+            <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4">
+              <div className="w-full max-w-xl rounded-3xl border border-neutral-200 bg-white p-6 shadow-2xl dark:border-neutral-800 dark:bg-neutral-950">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-semibold text-neutral-950 dark:text-neutral-50">使用说明</h2>
+                    <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">快速了解这套 PDF 审稿工作台的常用操作。</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setHelpOpen(false)}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-600 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    关闭
+                  </button>
+                </div>
+                <div className="mt-5 space-y-3">
+                  {[
+                    "上传 PDF 后，可先用“AI 审稿（当前页）”快速扫描当前页。",
+                    "如需批量处理，可从当前页起连续审核最多 10 页。",
+                    "选中文本后可“复制文本”或直接“添加批注”。",
+                    "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
+                    "若出现无法定位到原文的 AI 批注，系统会自动忽略并提示。",
+                  ].map((item, index) => (
+                    <div
+                      key={item}
+                      className="flex items-start gap-3 rounded-2xl bg-neutral-50 px-4 py-3 dark:bg-neutral-900"
+                    >
+                      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-950 text-xs font-medium text-white dark:bg-neutral-100 dark:text-neutral-900">
+                        {index + 1}
+                      </span>
+                      <p className="text-sm leading-6 text-neutral-700 dark:text-neutral-300">{item}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-1 lg:row-start-1 lg:flex lg:h-full lg:min-h-[66px] lg:items-center">
+            <div className="flex w-full items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100">使用提示</div>
+                <p className="mt-0.5 text-xs leading-5 text-neutral-500 dark:text-neutral-400">
+                  查看这套审稿工具的常用操作说明与快捷路径。
+                </p>
+              </div>
               <button
                 type="button"
-                disabled={pageNumber <= 1 || !pdfDoc}
-                className="rounded border border-neutral-300 px-2 py-1 dark:border-neutral-600 disabled:opacity-40"
-                onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+                onClick={() => setHelpOpen(true)}
+                className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
               >
-                上一页
+                查看说明
               </button>
-              <button
-                type="button"
-                disabled={pageNumber >= numPages || !pdfDoc}
-                className="rounded border border-neutral-300 px-2 py-1 dark:border-neutral-600 disabled:opacity-40"
-                onClick={() => setPageNumber((p) => Math.min(numPages || p, p + 1))}
-              >
-                下一页
-              </button>
-              <span className="text-neutral-600 dark:text-neutral-400">
+            </div>
+          </div>
+
+          <aside className="lg:col-start-1 lg:row-start-2">
+            <div className="flex h-full min-h-0 flex-col gap-4">
+              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-amber-200 bg-[radial-gradient(circle_at_top_left,_rgba(253,230,138,0.35),_transparent_38%),linear-gradient(180deg,rgba(255,251,235,0.98),rgba(254,249,195,0.96))] p-5 shadow-sm dark:border-amber-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.12),_transparent_38%),linear-gradient(180deg,rgba(41,30,9,0.98),rgba(24,24,27,0.98))]">
+                <div className="pointer-events-none absolute -right-8 top-0 h-24 w-24 rounded-full bg-amber-200/50 blur-3xl dark:bg-amber-400/10" />
+                <div className="relative flex h-full flex-col">
+                  <h2 className="text-xl font-semibold tracking-tight text-amber-950 dark:text-amber-50">必应搜索</h2>
+                  <textarea
+                    value={bingSearchText}
+                    onChange={(e) => setBingSearchText(e.target.value)}
+                    placeholder="输入要搜索的内容"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        openBingSearch();
+                      }
+                    }}
+                    className="mt-4 block min-h-0 flex-1 resize-none rounded-2xl border border-amber-200 bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-amber-400 dark:border-amber-800 dark:bg-neutral-950 dark:text-neutral-100"
+                  />
+                  <p className="mt-3 text-xs text-amber-900/75 dark:text-amber-100/60">按 Enter 搜索，按 Shift + Enter 换行。</p>
+                </div>
+              </section>
+
+              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-sky-200 bg-[radial-gradient(circle_at_top_left,_rgba(186,230,253,0.5),_transparent_36%),linear-gradient(180deg,rgba(240,249,255,0.98),rgba(248,250,252,0.98))] p-5 shadow-sm dark:border-sky-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_36%),linear-gradient(180deg,rgba(2,6,23,0.98),rgba(3,7,18,0.98))]">
+                <div className="pointer-events-none absolute -left-8 top-12 h-24 w-24 rounded-full bg-sky-200/40 blur-3xl dark:bg-sky-500/10" />
+                <div className="relative flex h-full flex-col">
+                  <h2 className="text-xl font-semibold tracking-tight text-sky-950 dark:text-sky-50">重要讲话数据库</h2>
+                  <textarea
+                    value={speechSearchText}
+                    onChange={(e) => setSpeechSearchText(e.target.value)}
+                    placeholder="输入要检索的讲话内容"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        openSpeechDatabaseSearch();
+                      }
+                    }}
+                    className="mt-4 block min-h-0 flex-1 resize-none rounded-2xl border border-sky-200 bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:border-sky-800 dark:bg-neutral-950 dark:text-neutral-100"
+                  />
+                  <p className="mt-3 text-xs text-sky-800/80 dark:text-sky-200/70">按 Enter 搜索，按 Shift + Enter 换行。</p>
+                </div>
+              </section>
+            </div>
+          </aside>
+
+          <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-1">
+            <div className="flex min-h-[66px] flex-wrap items-center gap-3 text-sm">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={pageNumber <= 1 || !pdfDoc}
+                  className="rounded-xl border border-neutral-300 px-3 py-2 leading-none transition hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900 disabled:opacity-40"
+                  onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+                >
+                  上一页
+                </button>
+                <button
+                  type="button"
+                  disabled={pageNumber >= numPages || !pdfDoc}
+                  className="rounded-xl border border-neutral-300 px-3 py-2 leading-none transition hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900 disabled:opacity-40"
+                  onClick={() => setPageNumber((p) => Math.min(numPages || p, p + 1))}
+                >
+                  下一页
+                </button>
+              </div>
+              <div className="rounded-xl bg-neutral-100 px-3 py-2 leading-none text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
                 第 {pageNumber} / {numPages || "—"} 页
-              </span>
-              <label className="flex items-center gap-1">
-                缩放
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-neutral-500 dark:text-neutral-400">跳转到</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={Math.max(1, numPages)}
+                  inputMode="numeric"
+                  value={pageJumpInput}
+                  onChange={(e) => setPageJumpInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      jumpToPage();
+                    }
+                  }}
+                  className="w-20 rounded-xl border border-neutral-300 bg-white px-3 py-2 leading-none text-sm dark:border-neutral-700 dark:bg-neutral-950"
+                />
+                <button
+                  type="button"
+                  disabled={!pdfDoc}
+                  onClick={jumpToPage}
+                  className="rounded-xl border border-neutral-300 px-3 py-2 leading-none transition hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900 disabled:opacity-40"
+                >
+                  跳转
+                </button>
+              </div>
+              <div className="ml-auto flex items-center gap-2">
+                <span className="text-neutral-500 dark:text-neutral-400">缩放</span>
                 <input
                   type="range"
                   min={0.6}
@@ -868,191 +1163,158 @@ export default function PdfReviewer() {
                   value={scale}
                   onChange={(e) => setScale(Number(e.target.value))}
                 />
-                <span className="tabular-nums">{scale.toFixed(1)}×</span>
-              </label>
+                <span className="min-w-12 tabular-nums text-neutral-700 dark:text-neutral-200">{scale.toFixed(1)}×</span>
+              </div>
             </div>
+          </div>
 
-            <div className="overflow-auto rounded-lg border border-neutral-200 bg-neutral-100 p-4 dark:border-neutral-800 dark:bg-neutral-950">
-              {docLoading && <p className="text-sm text-neutral-500">正在打开 PDF…</p>}
-              {docError && <p className="text-sm text-red-600">{docError}</p>}
-              {!docLoading && !docError && pdfDoc && (
-                <div
-                  ref={pdfContainerRef}
-                  className="relative mx-auto inline-block shadow-md"
-                  style={pageSize.w ? { width: pageSize.w, height: pageSize.h } : undefined}
-                >
-                  <canvas ref={canvasRef} className="block max-w-full" />
-                  <div ref={textLayerRef} className="pdf-text-layer" />
+          {/* PDF canvas + overlays */}
+          <div className="overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2">
+            {docLoading && <p className="text-sm text-neutral-500">正在打开 PDF…</p>}
+            {docError && <p className="text-sm text-red-600">{docError}</p>}
+            {!docLoading && !docError && pdfDoc && (
+              <div
+                ref={pdfContainerRef}
+                className="relative mx-auto inline-block shadow-md"
+                style={pageSize.w ? { width: pageSize.w, height: pageSize.h } : undefined}
+              >
+                <canvas ref={canvasRef} className="block max-w-full" />
+                <div ref={textLayerRef} className="pdf-text-layer" />
 
-                  {/* Highlight overlays */}
-                  {pageSize.w > 0 &&
-                    screenAnnotations.map((a) =>
-                      a.rects.map((r, ri) => (
-                        <div
-                          key={`${a.id}-${ri}`}
-                          className={`pointer-events-none absolute z-[1] rounded-sm ${highlightBgClass(a.kind)}`}
-                          style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
-                        />
-                      )),
-                    )}
-
-                  {/* Yellow preview highlight: live drag / popup / add form */}
-                  {(() => {
-                    if (!pageSize.w) return null;
-                    const pendingRects = addingAnnotation?.charRange && textLayerRef.current
-                      ? computeDomHighlightRects(
-                          textLayerRef.current,
-                          addingAnnotation.charRange[0],
-                          addingAnnotation.charRange[1],
-                        )
-                      : liveSelectionRange && textLayerRef.current
-                        ? computeDomHighlightRects(
-                            textLayerRef.current,
-                            liveSelectionRange[0],
-                            liveSelectionRange[1],
-                          )
-                        : [];
-                    return pendingRects.map((r, ri) => (
+                {/* Highlight overlays */}
+                {pageSize.w > 0 &&
+                  screenAnnotations.map((a) =>
+                    a.rects.map((r, ri) => (
                       <div
-                        key={`pending-${ri}`}
-                        className="pointer-events-none absolute z-[1] rounded-sm bg-yellow-400/40"
+                        key={`${a.id}-${ri}`}
+                        className={`pointer-events-none absolute z-[1] rounded-sm ${highlightBgClass(a.kind)}`}
                         style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
                       />
-                    ));
-                  })()}
-
-                  {/* Rectangle marquee while dragging */}
-                  {selectionBox && (
-                    <>
-                      <div
-                        className="pointer-events-none absolute z-[3] border-2 border-yellow-500/80 bg-yellow-300/10"
-                        style={{
-                          left: selectionBox.x,
-                          top: selectionBox.y,
-                          width: selectionBox.w,
-                          height: selectionBox.h,
-                        }}
-                      />
-                      {[
-                        { key: "resize-nw", left: selectionBox.x - 5, top: selectionBox.y - 5, cursor: "nwse-resize" },
-                        { key: "resize-n", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y - 5, cursor: "ns-resize" },
-                        { key: "resize-ne", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y - 5, cursor: "nesw-resize" },
-                        { key: "resize-e", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y + selectionBox.h / 2 - 5, cursor: "ew-resize" },
-                        { key: "resize-se", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "nwse-resize" },
-                        { key: "resize-s", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "ns-resize" },
-                        { key: "resize-sw", left: selectionBox.x - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "nesw-resize" },
-                        { key: "resize-w", left: selectionBox.x - 5, top: selectionBox.y + selectionBox.h / 2 - 5, cursor: "ew-resize" },
-                      ].map((handle) => (
-                        <div
-                          key={handle.key}
-                          data-selection-handle={handle.key}
-                          className="absolute z-[4] h-2.5 w-2.5 rounded-full border border-yellow-700 bg-white"
-                          style={{
-                            left: handle.left,
-                            top: handle.top,
-                            cursor: handle.cursor,
-                          }}
-                        />
-                      ))}
-                    </>
+                    )),
                   )}
 
-                  {/* Selection popup: "添加批注" button */}
-                  {selectionPopup && (
+                {/* Yellow preview highlight: live drag / popup / AI generation */}
+                {(() => {
+                  if (!pageSize.w) return null;
+                  const pendingRects = creatingSelectionAnnotation?.charRange && textLayerRef.current
+                    ? computeDomHighlightRects(
+                        textLayerRef.current,
+                        creatingSelectionAnnotation.charRange[0],
+                        creatingSelectionAnnotation.charRange[1],
+                      )
+                    : liveSelectionRange && textLayerRef.current
+                      ? computeDomHighlightRects(
+                          textLayerRef.current,
+                          liveSelectionRange[0],
+                          liveSelectionRange[1],
+                        )
+                      : [];
+                  return pendingRects.map((r, ri) => (
+                    <div
+                      key={`pending-${ri}`}
+                      className="pointer-events-none absolute z-[1] rounded-sm bg-yellow-400/40"
+                      style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
+                    />
+                  ));
+                })()}
+
+                {/* Rectangle marquee while dragging */}
+                {selectionBox && (
+                  <>
+                    <div
+                      className="pointer-events-none absolute z-[3] border-2 border-yellow-500/80 bg-yellow-300/10"
+                      style={{
+                        left: selectionBox.x,
+                        top: selectionBox.y,
+                        width: selectionBox.w,
+                        height: selectionBox.h,
+                      }}
+                    />
+                    {[
+                      { key: "resize-nw", left: selectionBox.x - 5, top: selectionBox.y - 5, cursor: "nwse-resize" },
+                      { key: "resize-n", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y - 5, cursor: "ns-resize" },
+                      { key: "resize-ne", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y - 5, cursor: "nesw-resize" },
+                      { key: "resize-e", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y + selectionBox.h / 2 - 5, cursor: "ew-resize" },
+                      { key: "resize-se", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "nwse-resize" },
+                      { key: "resize-s", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "ns-resize" },
+                      { key: "resize-sw", left: selectionBox.x - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "nesw-resize" },
+                      { key: "resize-w", left: selectionBox.x - 5, top: selectionBox.y + selectionBox.h / 2 - 5, cursor: "ew-resize" },
+                    ].map((handle) => (
+                      <div
+                        key={handle.key}
+                        data-selection-handle={handle.key}
+                        className="absolute z-[4] h-2.5 w-2.5 rounded-full border border-yellow-700 bg-white"
+                        style={{
+                          left: handle.left,
+                          top: handle.top,
+                          cursor: handle.cursor,
+                        }}
+                      />
+                    ))}
+                  </>
+                )}
+
+                {/* Selection popup: "添加批注" button */}
+                {selectionPopup && (
+                  <div
+                    data-selection-popup="true"
+                    className="absolute z-20 -translate-x-1/2 -translate-y-full"
+                    style={{ left: selectionPopup.x, top: selectionPopup.y }}
+                  >
                     <div
                       data-selection-popup="true"
-                      className="absolute z-20 -translate-x-1/2 -translate-y-full"
-                      style={{ left: selectionPopup.x, top: selectionPopup.y }}
+                      className="flex items-center gap-2 rounded-md bg-neutral-900 p-1 shadow-lg dark:bg-neutral-100"
                     >
                       <button
                         type="button"
                         data-selection-popup="true"
                         onMouseDown={(e) => e.stopPropagation()}
-                        onClick={openAddForm}
-                        className="rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white shadow-lg dark:bg-neutral-100 dark:text-neutral-900"
+                        onClick={() => void copySelectionText()}
+                        className="rounded px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/10 dark:text-neutral-900 dark:hover:bg-neutral-200"
                       >
-                        添加批注
+                        {copySelectionFeedback ? "已复制" : "复制文本"}
+                      </button>
+                      <button
+                        type="button"
+                        data-selection-popup="true"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        disabled={!!creatingSelectionAnnotation}
+                        onClick={() => void createAnnotationFromSelection()}
+                        className="rounded bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-50 dark:bg-neutral-200 dark:text-neutral-900 dark:hover:bg-neutral-300"
+                      >
+                        {creatingSelectionAnnotation ? "AI 生成中…" : "添加批注"}
                       </button>
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Sidebar */}
-          <aside className="w-full shrink-0 lg:w-[380px]">
+          <aside className="w-full shrink-0 lg:col-start-3 lg:row-span-2">
             <h2 className="mb-2 text-sm font-semibold text-neutral-800 dark:text-neutral-200">批注</h2>
 
-            {/* Manual add form */}
-            {addingAnnotation && (
-              <div className="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm dark:border-emerald-700 dark:bg-emerald-950">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="font-semibold text-emerald-800 dark:text-emerald-200">新增批注</span>
-                  <button
-                    type="button"
-                    onClick={() => setAddingAnnotation(null)}
-                    className="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-                  >
-                    取消
-                  </button>
+            {creatingSelectionAnnotation && (
+              <div className="mb-3 rounded-lg border border-neutral-200 bg-white p-3 text-sm shadow-sm dark:border-neutral-700 dark:bg-neutral-900">
+                <div className="flex items-center justify-between gap-2 border-b border-neutral-100 pb-2 dark:border-neutral-800">
+                  <span className="shrink-0 rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                    生成中
+                  </span>
+                  <span className="text-xs text-neutral-500 dark:text-neutral-400">问问 AI</span>
                 </div>
-                <p className="mb-2 text-xs text-neutral-600 dark:text-neutral-400">
-                  选中文字：<span className="font-medium text-neutral-900 dark:text-neutral-100">{addingAnnotation.excerpt}</span>
+                <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+                  摘录：{creatingSelectionAnnotation.excerpt || "—"}
                 </p>
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-xs text-neutral-600 dark:text-neutral-400">AI 辅助</span>
-                  <button
-                    type="button"
-                    onClick={() => void askAiForSuggestion()}
-                    disabled={loadingAiSuggestion}
-                    className="rounded border border-sky-300 bg-white px-2 py-0.5 text-[11px] font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-50 dark:border-sky-700 dark:bg-neutral-900 dark:text-sky-300"
-                  >
-                    {loadingAiSuggestion ? "AI 生成中…" : "问问 AI"}
-                  </button>
+                <div className="mt-2 rounded-md bg-amber-50/90 px-2.5 py-2 text-neutral-900 dark:bg-amber-950/30 dark:text-neutral-100">
+                  <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">修改意见</span>
+                  <p className="mt-0.5 leading-relaxed">AI 正在生成批注…</p>
                 </div>
-                <label className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">
-                  类型
-                  <select
-                    value={addForm.kind}
-                    onChange={(e) => setAddForm((f) => ({ ...f, kind: e.target.value as IssueKind }))}
-                    className="ml-2 rounded border border-neutral-300 bg-white px-2 py-0.5 text-xs dark:border-neutral-600 dark:bg-neutral-800"
-                  >
-                    <option value="error">确定错误</option>
-                    <option value="suspected">疑似错误</option>
-                  </select>
-                </label>
-                <label className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">
-                  修改意见
-                  <textarea
-                    value={addForm.suggestion}
-                    onChange={(e) => setAddForm((f) => ({ ...f, suggestion: e.target.value }))}
-                    rows={2}
-                    className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
-                  />
-                </label>
-                <label className="mb-2 block text-xs text-neutral-600 dark:text-neutral-400">
-                  说明（可选）
-                  <textarea
-                    value={addForm.reason}
-                    onChange={(e) => setAddForm((f) => ({ ...f, reason: e.target.value }))}
-                    rows={1}
-                    className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={confirmAdd}
-                  disabled={!addForm.suggestion.trim()}
-                  className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
-                >
-                  确认添加
-                </button>
               </div>
             )}
 
-            {screenAnnotations.length === 0 && !addingAnnotation ? (
-              <p className="text-sm text-neutral-500">尚未审稿。点击「AI 审稿」分析当前页，或在 PDF 上选中文字手动添加批注。</p>
+            {screenAnnotations.length === 0 && !creatingSelectionAnnotation ? (
+              <p className="text-sm text-neutral-500">尚未审稿。点击「AI 审稿」分析当前页，或在 PDF 上选中文字后直接添加 AI 批注。</p>
             ) : (
               <ul className="flex flex-col gap-3">
                 {screenAnnotations.map((a, i) => {
@@ -1153,9 +1415,12 @@ export default function PdfReviewer() {
                           />
                         </div>
                       ) : (
-                        <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
-                          摘录：{a.excerpt || "—"}
-                        </p>
+                        <details className="mt-2 rounded-md border border-neutral-200/80 bg-neutral-50/70 px-2.5 py-1.5 dark:border-neutral-800 dark:bg-neutral-950/40">
+                          <DisclosureSummary label="原句" />
+                          <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+                            {a.excerpt || "—"}
+                          </p>
+                        </details>
                       )}
 
                       {/* Suggestion */}
@@ -1176,7 +1441,7 @@ export default function PdfReviewer() {
                           }`}
                         >
                           <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">修改意见</span>
-                          <p className="mt-0.5 leading-relaxed">{a.suggestion?.trim() || a.reason || "—"}</p>
+                          <p className="mt-0.5 leading-relaxed">{a.suggestion?.trim() || "—"}</p>
                         </div>
                       )}
 
@@ -1191,14 +1456,14 @@ export default function PdfReviewer() {
                             className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
                           />
                         </div>
-                      ) : (
-                        a.suggestion?.trim() && a.reason?.trim() && (
+                      ) : a.reason?.trim() ? (
+                        <details className="mt-2 rounded-md border border-neutral-200/80 bg-neutral-50/70 px-2.5 py-1.5 dark:border-neutral-800 dark:bg-neutral-950/40">
+                          <DisclosureSummary label="说明" />
                           <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
-                            <span className="text-neutral-500">说明：</span>
                             {a.reason}
                           </p>
-                        )
-                      )}
+                        </details>
+                      ) : null}
                     </li>
                   );
                 })}

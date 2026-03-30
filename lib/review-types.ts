@@ -45,7 +45,7 @@ export type NormalizedReviewIssue = {
 /** 统一批注类型：AI 生成和手动标注共用 */
 export type Annotation = {
   id: string;
-  source: "ai" | "manual";
+  source: "ai" | "manual" | "selection-ai";
   excerpt: string;
   kind: IssueKind;
   suggestion: string;
@@ -155,7 +155,7 @@ export function repairJsonStringInnerQuotes(jsonStr: string): string {
 export function parseReviewJson(raw: string): ReviewResponse {
   const trimmed = raw.trim();
   const codeBlock = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  let jsonStr = codeBlock ? codeBlock[1].trim() : trimmed;
+  const jsonStr = codeBlock ? codeBlock[1].trim() : trimmed;
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);

@@ -6,6 +6,18 @@ import { readMinimaxLocalConfig } from "@/lib/minimax-local-config";
 import { normalizeIssueKind, repairJsonStringInnerQuotes } from "@/lib/review-types";
 
 const DEFAULT_ANTHROPIC_BASE = "https://api.minimaxi.com/anthropic";
+const DEFAULT_MODEL = "MiniMax-M2.7";
+const SUPPORTED_ANTHROPIC_MODELS = new Set([
+  "MiniMax-M2.7",
+  "MiniMax-M2.7-highspeed",
+  "MiniMax-M2.5",
+  "MiniMax-M2.5-highspeed",
+  "MiniMax-M2.1",
+  "MiniMax-M2.1-highspeed",
+  "MiniMax-M2",
+]);
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
 
 const bodySchema = z.object({
   excerpt: z.string().min(1).max(500),
@@ -28,12 +40,13 @@ const SYSTEM = `${EDITOR_PUBLISHING_SPEC}
 - 只聚焦该摘录，不要输出整页多条问题
 - 若该摘录明显存在语病、搭配不当、错别字、标点或表达问题，给出直接可执行的修改建议
 - 若问题不够确定，可将 kind 设为 suspected；也允许写中文「错误」「疑似」，程序会自动归一
-- suggestion 尽量短、直接、可落地
-- reason 用一句话说明原因
+- suggestion 只写正确内容或具体改法，不要解释原因，不要复述规则，不要写分析过程
+- suggestion 尽量短、直接、可落地；例如「改为：xxx」「删除：|」「将『A』改为『B』」
+- reason 用一句话简要说明原因，便于折叠展示
 - 不要输出 Markdown，不要代码围栏
 
 返回 JSON：
-{"suggestion":"建议修改为：xxx","reason":"一句话原因","kind":"error 或 suspected"}`.trim();
+{"suggestion":"改为：xxx","reason":"一句话原因","kind":"error 或 suspected"}`.trim();
 
 type AnthropicContentBlock =
   | { type: "text"; text: string }
@@ -43,6 +56,7 @@ type AnthropicMessagesResponse = {
   content?: AnthropicContentBlock[];
   error?: { type?: string; message?: string };
   message?: string;
+  request_id?: string;
 };
 
 function extractTextFromAnthropicMessage(data: AnthropicMessagesResponse): string {
@@ -54,6 +68,27 @@ function extractTextFromAnthropicMessage(data: AnthropicMessagesResponse): strin
     )
     .map((b) => b.text)
     .join("");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseMiniMaxErrorCode(data: AnthropicMessagesResponse | null, responseText: string): string | null {
+  const haystack = [data?.error?.message, data?.message, responseText]
+    .filter((x): x is string => typeof x === "string" && x.length > 0)
+    .join(" ");
+  const matched = haystack.match(/\((\d+)\)/);
+  return matched?.[1] ?? null;
+}
+
+function isRetryableFailure(
+  status: number,
+  data: AnthropicMessagesResponse | null,
+  responseText: string,
+): boolean {
+  const errorCode = parseMiniMaxErrorCode(data, responseText);
+  return RETRYABLE_STATUS.has(status) || (errorCode ? RETRYABLE_ERROR_CODES.has(errorCode) : false);
 }
 
 export async function POST(req: Request) {
@@ -83,14 +118,23 @@ export async function POST(req: Request) {
     local.anthropicBase ||
     DEFAULT_ANTHROPIC_BASE
   ).replace(/\/$/, "");
-  const model =
+  const configuredModel =
     process.env.MINIMAX_MODEL?.trim() ||
     local.model ||
-    "MiniMax-M2.1";
+    DEFAULT_MODEL;
+  const model = SUPPORTED_ANTHROPIC_MODELS.has(configuredModel)
+    ? configuredModel
+    : DEFAULT_MODEL;
   const anthropicVersion =
     process.env.ANTHROPIC_VERSION?.trim() ||
     local.anthropicVersion ||
     "2023-06-01";
+
+  if (configuredModel !== model) {
+    console.log(
+      `[suggest-edit] 配置模型 ${configuredModel} 不在 Anthropic 兼容接口支持列表内，已自动回退到 ${model}`,
+    );
+  }
 
   if (!apiKey) {
     return NextResponse.json({ error: "未配置 API Key" }, { status: 503 });
@@ -125,39 +169,76 @@ export async function POST(req: Request) {
     console.log(userContent);
     console.log("[suggest-edit] ---------- 提示词结束 ----------");
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": anthropicVersion,
-      },
-      body: bodyStr,
-      signal: AbortSignal.timeout(120_000),
-    });
+    const MAX_ATTEMPTS = 3;
+    let responseText = "";
+    let data: AnthropicMessagesResponse | null = null;
+    let status = 500;
 
-    const responseText = await res.text();
-    console.log("[suggest-edit] ---------- AI 响应 ----------");
-    console.log("[suggest-edit] HTTP 状态:", res.status, " 响应长度:", responseText.length, "字符");
-    console.log("[suggest-edit] 响应原文:");
-    console.log(responseText);
-    let data: AnthropicMessagesResponse;
-    try {
-      data = JSON.parse(responseText) as AnthropicMessagesResponse;
-    } catch {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": anthropicVersion,
+        },
+        body: bodyStr,
+        signal: AbortSignal.timeout(120_000),
+      });
+
+      status = res.status;
+      responseText = await res.text();
+      console.log("[suggest-edit] ---------- AI 响应 ----------");
+      console.log("[suggest-edit] HTTP 状态:", res.status, " 响应长度:", responseText.length, "字符");
+      console.log("[suggest-edit] 响应原文:");
+      console.log(responseText);
+
+      try {
+        data = JSON.parse(responseText) as AnthropicMessagesResponse;
+      } catch {
+        data = null;
+      }
+
+      if (res.ok) break;
+
+      if (attempt < MAX_ATTEMPTS && isRetryableFailure(res.status, data, responseText)) {
+        const requestId = data?.request_id ?? "unknown";
+        console.log(
+          `[suggest-edit] 上游瞬时错误，准备第 ${attempt + 1}/${MAX_ATTEMPTS} 次重试；request_id=${requestId}`,
+        );
+        await sleep(500 * attempt);
+        continue;
+      }
+
+      return NextResponse.json(
+        {
+          error: "模型接口错误",
+          status: res.status,
+          detail:
+            data?.error?.message ??
+            data?.message ??
+            responseText.slice(0, 500),
+          requestId: data?.request_id,
+        },
+        { status: 502 },
+      );
+    }
+
+    if (!data) {
       return NextResponse.json(
         { error: "模型返回非 JSON", detail: responseText.slice(0, 600) },
         { status: 502 },
       );
     }
 
-    if (!res.ok) {
-      const detail =
-        data.error?.message ??
-        data.message ??
-        JSON.stringify(data).slice(0, 500);
+    if (status < 200 || status >= 300) {
       return NextResponse.json(
-        { error: "模型接口错误", status: res.status, detail },
+        {
+          error: "模型接口错误",
+          status,
+          detail: data.error?.message ?? data.message ?? JSON.stringify(data).slice(0, 500),
+          requestId: data.request_id,
+        },
         { status: 502 },
       );
     }
