@@ -21,6 +21,7 @@ import {
   resolveIssueCharRange,
 } from "@/lib/pdf-text-match";
 import type { Annotation, IssueKind, NormalizedReviewIssue } from "@/lib/review-types";
+import { copyTextToClipboard } from "@/lib/copy-text";
 import {
   annotateTextLayerCharRanges,
   computeDomHighlightRects,
@@ -671,7 +672,7 @@ export default function PdfReviewer() {
   const copySelectionText = useCallback(async () => {
     if (!selectionPopup?.text) return;
     try {
-      await navigator.clipboard.writeText(selectionPopup.text);
+      await copyTextToClipboard(selectionPopup.text);
       setCopySelectionFeedback(true);
       window.setTimeout(() => setCopySelectionFeedback(false), 1200);
     } catch (e) {
