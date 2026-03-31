@@ -6,7 +6,7 @@
     "postinstall": "node scripts/copy-pdfjs.mjs",
     "dev": "next dev --webpack",
     "build": "next build --webpack",
-    "start": "next start",
+    "start": "next start -H 0.0.0.0",
     "lint": "eslint"
   },
   "dependencies": {
