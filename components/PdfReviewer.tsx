@@ -92,7 +92,7 @@ export default function PdfReviewer() {
   const [numPages, setNumPages] = useState(0);
   const [pageNumber, setPageNumber] = useState(1);
   const [pageJumpInput, setPageJumpInput] = useState("1");
-  const [scale, setScale] = useState(1.2);
+  const [scale, setScale] = useState(1.3);
 
   const [pageSize, setPageSize] = useState({ w: 0, h: 0 });
 
@@ -715,31 +715,21 @@ export default function PdfReviewer() {
 
     const issues = (data.issues ?? []) as NormalizedReviewIssue[];
     const matches = matchIssuesToCharRanges(flatText, issues);
-    const aiAnnotations: Annotation[] = [];
-    let droppedCount = 0;
-
-    for (const m of matches) {
-      if (!m.charRange) {
-        droppedCount += 1;
-        continue;
-      }
-      aiAnnotations.push({
-        id: genId(),
-        source: "ai" as const,
-        excerpt: m.excerpt,
-        kind: m.kind,
-        suggestion: m.suggestion ?? "",
-        reason: m.reason,
-        charRange: m.charRange,
-      });
-    }
+    const aiAnnotations: Annotation[] = matches.map((m) => ({
+      id: genId(),
+      source: "ai" as const,
+      excerpt: m.excerpt,
+      kind: m.kind,
+      suggestion: m.suggestion ?? "",
+      reason: m.reason,
+      charRange: m.charRange ?? null,
+    }));
 
     setPageAnnotations((prev) => {
       const existing = prev[targetPageNumber] ?? [];
       const preserved = existing.filter((a) => a.source !== "ai");
       return { ...prev, [targetPageNumber]: [...aiAnnotations, ...preserved] };
     });
-    return { droppedCount };
   }, [loadPageText]);
 
   const runAiReview = useCallback(async () => {
@@ -748,10 +738,7 @@ export default function PdfReviewer() {
     setNotice(null);
     setLoadingAi(true);
     try {
-      const { droppedCount } = await reviewSinglePage(pageNumber, reviewMode);
-      if (droppedCount > 0) {
-        setNotice(`AI 返回了 ${droppedCount} 条无法与当前页原文对齐的批注，已自动忽略。`);
-      }
+      await reviewSinglePage(pageNumber, reviewMode);
     } catch (e) {
       setError(e instanceof Error ? e.message : "审稿失败");
     } finally {
@@ -768,30 +755,21 @@ export default function PdfReviewer() {
     setError(null);
     setNotice(null);
     setBatchReviewProgress({ done: 0, total, currentPage: startPage });
-    let totalDroppedCount = 0;
     const failedPages: number[] = [];
     try {
       for (let offset = 0; offset < total; offset += 1) {
         const targetPageNumber = startPage + offset;
         setBatchReviewProgress({ done: offset, total, currentPage: targetPageNumber });
         try {
-          const { droppedCount } = await reviewSinglePage(targetPageNumber, reviewMode);
-          totalDroppedCount += droppedCount;
+          await reviewSinglePage(targetPageNumber, reviewMode);
         } catch (e) {
           failedPages.push(targetPageNumber);
           console.error(`[batch-review] 第 ${targetPageNumber} 页审稿失败:`, e);
         }
       }
       setBatchReviewProgress({ done: total, total, currentPage: startPage + total - 1 });
-      const notices: string[] = [];
-      if (totalDroppedCount > 0) {
-        notices.push(`连续审稿中有 ${totalDroppedCount} 条批注无法与原文对齐，已自动忽略。`);
-      }
       if (failedPages.length > 0) {
-        notices.push(`以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`);
-      }
-      if (notices.length > 0) {
-        setNotice(notices.join(" "));
+        setNotice(`以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`);
       }
     } finally {
       setBatchReviewProgress(null);
@@ -1026,7 +1004,7 @@ export default function PdfReviewer() {
                     "如需批量处理，可从当前页起连续审核最多 10 页。",
                     "选中文本后可“复制文本”或直接“添加批注”。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
-                    "若出现无法定位到原文的 AI 批注，系统会自动忽略并提示。",
+                    "若某条 AI 批注无法在 PDF 文本层定位，仍会出现在右侧批注列表中，页面上不会高亮。",
                   ].map((item, index) => (
                     <div
                       key={item}
