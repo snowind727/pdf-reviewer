@@ -740,39 +740,72 @@ export default function PdfReviewer() {
   /* --- AI review -------------------------------------------------- */
   const reviewSinglePage = useCallback(async (targetPageNumber: number, mode: ReviewMode) => {
     const { flatText, formattedText } = await loadPageText(targetPageNumber);
-
-    const res = await fetch("/api/review-page", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pageIndex: targetPageNumber - 1,
-        text: formattedText.slice(0, 48000),
-        mode,
-      }),
+    const body = JSON.stringify({
+      pageIndex: targetPageNumber - 1,
+      text: formattedText.slice(0, 48000),
+      mode,
     });
 
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error ?? `第 ${targetPageNumber} 页审稿请求失败`);
+    const REVIEW_PAGE_ATTEMPTS = 3;
+    const reviewResponseRetryable = (status: number) =>
+      status === 429 || status === 529 || (status >= 500 && status < 600);
+
+    for (let attempt = 1; attempt <= REVIEW_PAGE_ATTEMPTS; attempt += 1) {
+      let res: Response;
+      try {
+        res = await fetch("/api/review-page", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+      } catch {
+        if (attempt < REVIEW_PAGE_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+          continue;
+        }
+        throw new Error("AI审稿异常，请稍后再试");
+      }
+
+      let data: { error?: string; issues?: unknown } = {};
+      try {
+        data = await res.json();
+      } catch {
+        /* ignore */
+      }
+
+      if (res.ok) {
+        const issues = (data.issues ?? []) as NormalizedReviewIssue[];
+        const matches = matchIssuesToCharRanges(flatText, issues);
+        const aiAnnotations: Annotation[] = matches.map((m) => ({
+          id: genId(),
+          source: "ai" as const,
+          excerpt: m.excerpt,
+          kind: m.kind,
+          suggestion: m.suggestion ?? "",
+          reason: m.reason,
+          charRange: m.charRange ?? null,
+        }));
+
+        setPageAnnotations((prev) => {
+          const existing = prev[targetPageNumber] ?? [];
+          const preserved = existing.filter((a) => a.source !== "ai");
+          return { ...prev, [targetPageNumber]: [...aiAnnotations, ...preserved] };
+        });
+        return;
+      }
+
+      if (attempt < REVIEW_PAGE_ATTEMPTS && reviewResponseRetryable(res.status)) {
+        await new Promise((r) => setTimeout(r, 500 * attempt));
+        continue;
+      }
+
+      if (reviewResponseRetryable(res.status)) {
+        throw new Error("AI审稿异常，请稍后再试");
+      }
+      throw new Error(typeof data.error === "string" ? data.error : `第 ${targetPageNumber} 页审稿请求失败`);
     }
 
-    const issues = (data.issues ?? []) as NormalizedReviewIssue[];
-    const matches = matchIssuesToCharRanges(flatText, issues);
-    const aiAnnotations: Annotation[] = matches.map((m) => ({
-      id: genId(),
-      source: "ai" as const,
-      excerpt: m.excerpt,
-      kind: m.kind,
-      suggestion: m.suggestion ?? "",
-      reason: m.reason,
-      charRange: m.charRange ?? null,
-    }));
-
-    setPageAnnotations((prev) => {
-      const existing = prev[targetPageNumber] ?? [];
-      const preserved = existing.filter((a) => a.source !== "ai");
-      return { ...prev, [targetPageNumber]: [...aiAnnotations, ...preserved] };
-    });
+    throw new Error("AI审稿异常，请稍后再试");
   }, [loadPageText]);
 
   const runAiReview = useCallback(async () => {
@@ -977,7 +1010,7 @@ export default function PdfReviewer() {
       {/* Header */}
       <header className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">PDF AI 审稿</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
           <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
             上传 PDF，支持当前页单页审稿，也支持从当前页起连续审稿最多 10 页；还可选中 PDF 文字后直接调用 AI 添加批注；导出 PDF 含高亮标注与批注。
           </p>

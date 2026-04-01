@@ -16,7 +16,8 @@ const SUPPORTED_ANTHROPIC_MODELS = new Set([
   "MiniMax-M2.1-highspeed",
   "MiniMax-M2",
 ]);
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+/** 含 529：部分上游在负载高时返回 529，与 MiniMax overloaded 类错误 */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
 const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
 const reviewModeSchema = z.enum(["precise", "discover-more"]);
 
@@ -125,6 +126,7 @@ function isRetryableFailure(
   data: AnthropicMessagesResponse | null,
   responseText: string,
 ): boolean {
+  if (data?.error?.type === "overloaded_error") return true;
   const errorCode = parseMiniMaxErrorCode(data, responseText);
   return RETRYABLE_STATUS.has(status) || (errorCode ? RETRYABLE_ERROR_CODES.has(errorCode) : false);
 }

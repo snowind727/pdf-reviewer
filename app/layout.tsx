@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PDF AI 审稿",
+  title: "AI 审稿",
   description: "上传 PDF，按页 AI 审稿并导出带标注的 PDF",
 };
 
