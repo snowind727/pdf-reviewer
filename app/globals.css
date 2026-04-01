@@ -49,3 +49,9 @@ body {
 .pdf-text-layer br {
   display: none;
 }
+
+/* Force grab cursor during drag-to-search */
+body.dragging-grab-cursor,
+body.dragging-grab-cursor * {
+  cursor: grabbing !important;
+}

@@ -145,6 +145,12 @@ export default function PdfReviewer() {
   const [bingSearchText, setBingSearchText] = useState("");
   const [speechSearchText, setSpeechSearchText] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [dragOverTarget, setDragOverTarget] = useState<'bing' | 'speech' | null>(null);
+  const [isDraggingSelection, setIsDraggingSelection] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<{ page: number; range: [number, number] }[]>([]);
+  const [currentSearchResultIndex, setCurrentSearchResultIndex] = useState(-1);
 
   /* --- Connector line refs ---------------------------------------- */
   const mainAreaRef = useRef<HTMLDivElement>(null);
@@ -160,6 +166,43 @@ export default function PdfReviewer() {
   const selectionOriginRef = useRef<{ x: number; y: number } | null>(null);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const selectionStartRectRef = useRef<ScreenRect | null>(null);
+
+  /* --- Custom drag interaction ----------------------------------- */
+  useEffect(() => {
+    if (!isDraggingSelection) return;
+    const body = document.body;
+    body.classList.add("dragging-grab-cursor");
+
+    const onMouseMove = (e: MouseEvent) => {
+      e.preventDefault();
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const bing = el?.closest("#bing-search-input");
+      const speech = el?.closest("#speech-search-input");
+      if (bing) setDragOverTarget("bing");
+      else if (speech) setDragOverTarget("speech");
+      else setDragOverTarget(null);
+    };
+
+    const onMouseUp = (e: MouseEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const text = selectionPopup?.text;
+      if (text) {
+        if (el?.closest("#bing-search-input")) setBingSearchText(text);
+        else if (el?.closest("#speech-search-input")) setSpeechSearchText(text);
+      }
+      setIsDraggingSelection(false);
+      setDragOverTarget(null);
+      body.classList.remove("dragging-grab-cursor");
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      body.classList.remove("dragging-grab-cursor");
+    };
+  }, [isDraggingSelection, selectionPopup]);
 
   /* --- Load pdf.js ------------------------------------------------ */
   useEffect(() => {
@@ -776,6 +819,72 @@ export default function PdfReviewer() {
     }
   }, [batchReviewCount, numPages, pageNumber, pdfDoc, reviewMode, reviewSinglePage]);
 
+  /* --- Search logic ----------------------------------------------- */
+  const performSearch = useCallback(async (q: string) => {
+    if (!pdfDoc || !q.trim()) {
+      setSearchResults([]);
+      setCurrentSearchResultIndex(-1);
+      return;
+    }
+    const results: { page: number; range: [number, number] }[] = [];
+    const query = q.toLowerCase();
+    
+    // Make sure we have text for all pages? 
+    // For large docs this might be slow, but let's try a reactive indexing
+    for (let pn = 1; pn <= numPages; pn++) {
+      let text = pageFlatTextRef.current[pn];
+      if (text === undefined) {
+        try {
+          const page = await pdfDoc.getPage(pn);
+          const tc = await page.getTextContent();
+          const items = getPageTextItems(tc.items as unknown[]);
+          text = items.map((i) => i.str).join("");
+          pageFlatTextRef.current[pn] = text;
+        } catch { continue; }
+      }
+      
+      let pos = 0;
+      while (true) {
+        const idx = text.toLowerCase().indexOf(query, pos);
+        if (idx === -1) break;
+        results.push({ page: pn, range: [idx, idx + query.length] });
+        pos = idx + query.length;
+      }
+    }
+    
+    setSearchResults(results);
+    if (results.length > 0) {
+      setCurrentSearchResultIndex(0);
+      const first = results[0];
+      if (first.page !== pageNumber) setPageNumber(first.page);
+    } else {
+      setCurrentSearchResultIndex(-1);
+    }
+  }, [numPages, pdfDoc, pageNumber]);
+
+  const nextSearchResult = useCallback(() => {
+    if (searchResults.length === 0) return;
+    const nextIdx = (currentSearchResultIndex + 1) % searchResults.length;
+    setCurrentSearchResultIndex(nextIdx);
+    const next = searchResults[nextIdx];
+    if (next.page !== pageNumber) setPageNumber(next.page);
+  }, [currentSearchResultIndex, pageNumber, searchResults]);
+
+  const prevSearchResult = useCallback(() => {
+    if (searchResults.length === 0) return;
+    const prevIdx = (currentSearchResultIndex - 1 + searchResults.length) % searchResults.length;
+    setCurrentSearchResultIndex(prevIdx);
+    const prev = searchResults[prevIdx];
+    if (prev.page !== pageNumber) setPageNumber(prev.page);
+  }, [currentSearchResultIndex, pageNumber, searchResults]);
+
+  const closeSearch = useCallback(() => {
+    setIsSearchOpen(false);
+    setSearchQuery("");
+    setSearchResults([]);
+    setCurrentSearchResultIndex(-1);
+  }, []);
+
   /* --- Ensure flatText is loaded for current page ------------------- */
   useEffect(() => {
     if (!pdfDoc || pageFlatTextRef.current[pageNumber]) return;
@@ -964,7 +1073,7 @@ export default function PdfReviewer() {
 
       {/* Main */}
       {fileUrl && (
-        <div ref={mainAreaRef} className="relative grid flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)_400px]">
+        <div ref={mainAreaRef} className="relative flex flex-1 flex-col gap-4 lg:flex-row lg:items-start">
           {/* SVG connector lines */}
           {connectorLines.length > 0 && (
             <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full overflow-visible">
@@ -1021,6 +1130,7 @@ export default function PdfReviewer() {
             </div>
           )}
 
+          <div className="grid min-w-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
           <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-1 lg:row-start-1 lg:flex lg:h-full lg:min-h-[66px] lg:items-center">
             <div className="flex w-full items-center justify-between gap-3">
               <div>
@@ -1046,6 +1156,7 @@ export default function PdfReviewer() {
                 <div className="relative flex h-full flex-col">
                   <h2 className="text-xl font-semibold tracking-tight text-amber-950 dark:text-amber-50">必应搜索</h2>
                   <textarea
+                    id="bing-search-input"
                     value={bingSearchText}
                     onChange={(e) => setBingSearchText(e.target.value)}
                     placeholder="输入要搜索的内容"
@@ -1055,7 +1166,23 @@ export default function PdfReviewer() {
                         openBingSearch();
                       }
                     }}
-                    className="mt-4 block min-h-0 flex-1 resize-none rounded-2xl border border-amber-200 bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-amber-400 dark:border-amber-800 dark:bg-neutral-950 dark:text-neutral-100"
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                      setDragOverTarget('bing');
+                    }}
+                    onDragLeave={() => setDragOverTarget((v) => v === 'bing' ? null : v)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const text = e.dataTransfer.getData('text/plain');
+                      if (text) setBingSearchText(text);
+                      setDragOverTarget(null);
+                    }}
+                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-amber-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                      dragOverTarget === 'bing'
+                        ? 'border-amber-500 ring-2 ring-amber-300 dark:border-amber-400 dark:ring-amber-500/40'
+                        : 'border-amber-200 dark:border-amber-800'
+                    }`}
                   />
                   <p className="mt-3 text-xs text-amber-900/75 dark:text-amber-100/60">按 Enter 搜索，按 Shift + Enter 换行。</p>
                 </div>
@@ -1066,6 +1193,7 @@ export default function PdfReviewer() {
                 <div className="relative flex h-full flex-col">
                   <h2 className="text-xl font-semibold tracking-tight text-sky-950 dark:text-sky-50">重要讲话数据库</h2>
                   <textarea
+                    id="speech-search-input"
                     value={speechSearchText}
                     onChange={(e) => setSpeechSearchText(e.target.value)}
                     placeholder="输入要检索的讲话内容"
@@ -1075,7 +1203,23 @@ export default function PdfReviewer() {
                         openSpeechDatabaseSearch();
                       }
                     }}
-                    className="mt-4 block min-h-0 flex-1 resize-none rounded-2xl border border-sky-200 bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:border-sky-800 dark:bg-neutral-950 dark:text-neutral-100"
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                      setDragOverTarget('speech');
+                    }}
+                    onDragLeave={() => setDragOverTarget((v) => v === 'speech' ? null : v)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const text = e.dataTransfer.getData('text/plain');
+                      if (text) setSpeechSearchText(text);
+                      setDragOverTarget(null);
+                    }}
+                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                      dragOverTarget === 'speech'
+                        ? 'border-sky-500 ring-2 ring-sky-300 dark:border-sky-400 dark:ring-sky-500/40'
+                        : 'border-sky-200 dark:border-sky-800'
+                    }`}
                   />
                   <p className="mt-3 text-xs text-sky-800/80 dark:text-sky-200/70">按 Enter 搜索，按 Shift + Enter 换行。</p>
                 </div>
@@ -1148,7 +1292,97 @@ export default function PdfReviewer() {
           </div>
 
           {/* PDF canvas + overlays */}
-          <div className="overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2">
+          <div className="relative overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2">
+            {/* PDF Search Trigger */}
+            {!isSearchOpen && pdfDoc && (
+              <button
+                type="button"
+                onClick={() => setIsSearchOpen(true)}
+                className="absolute right-4 top-4 z-20 flex h-10 w-10 items-center justify-center rounded-xl border border-neutral-200 bg-white shadow-sm transition-all hover:bg-neutral-50 active:scale-95 dark:border-neutral-800 dark:bg-neutral-900"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-neutral-600 dark:text-neutral-400"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.3-4.3" />
+                </svg>
+              </button>
+            )}
+
+            {/* Floating Search Bar */}
+            {isSearchOpen && (
+              <div className="absolute right-4 top-4 z-40 flex items-center gap-2 rounded-2xl border border-neutral-200 bg-white/95 p-2 shadow-2xl backdrop-blur-md dark:border-neutral-800 dark:bg-neutral-950/95">
+                <div className="flex min-w-[200px] items-center px-2">
+                  <input
+                    autoFocus
+                    type="text"
+                    placeholder="搜索文档内容..."
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      performSearch(e.target.value);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        if (e.shiftKey) prevSearchResult();
+                        else nextSearchResult();
+                      } else if (e.key === "Escape") {
+                        closeSearch();
+                      }
+                    }}
+                    className="w-full bg-transparent text-sm text-neutral-900 outline-none placeholder:text-neutral-400 dark:text-neutral-100"
+                  />
+                </div>
+
+                <div className="flex items-center gap-1 border-l border-neutral-200 pl-2 dark:border-neutral-800">
+                  {searchResults.length > 0 && (
+                    <span className="mr-2 text-[10px] font-medium tabular-nums text-neutral-500 dark:text-neutral-400">
+                      {currentSearchResultIndex + 1} / {searchResults.length}
+                    </span>
+                  )}
+                  
+                  <button
+                    type="button"
+                    onClick={prevSearchResult}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-500 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-900"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="18 15 12 9 6 15" />
+                    </svg>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={nextSearchResult}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-neutral-500 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-900"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={closeSearch}
+                    className="ml-1 flex h-8 w-8 items-center justify-center rounded-lg text-neutral-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
             {docLoading && <p className="text-sm text-neutral-500">正在打开 PDF…</p>}
             {docError && <p className="text-sm text-red-600">{docError}</p>}
             {!docLoading && !docError && pdfDoc && (
@@ -1197,6 +1431,22 @@ export default function PdfReviewer() {
                   ));
                 })()}
 
+                {/* Highlight current search result */}
+                {(() => {
+                  if (!pageSize.w || currentSearchResultIndex === -1 || !textLayerRef.current) return null;
+                  const match = searchResults[currentSearchResultIndex];
+                  if (!match || match.page !== pageNumber) return null;
+                  
+                  const rects = computeDomHighlightRects(textLayerRef.current, match.range[0], match.range[1]);
+                  return rects.map((r, ri) => (
+                    <div
+                      key={`search-match-${ri}`}
+                      className="pointer-events-none absolute z-[1] rounded-sm bg-blue-500/40 outline outline-1 outline-blue-500/60"
+                      style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
+                    />
+                  ));
+                })()}
+
                 {/* Rectangle marquee while dragging */}
                 {selectionBox && (
                   <>
@@ -1209,6 +1459,24 @@ export default function PdfReviewer() {
                         height: selectionBox.h,
                       }}
                     />
+                    {/* Custom mouse-based grab area inside selection box */}
+                    {selectionPopup && (
+                      <div
+                        data-selection-popup="true"
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          setIsDraggingSelection(true);
+                        }}
+                        className="absolute z-[3] cursor-grab active:cursor-grabbing"
+                        style={{
+                          left: selectionBox.x + 6,
+                          top: selectionBox.y + 6,
+                          width: Math.max(0, selectionBox.w - 12),
+                          height: Math.max(0, selectionBox.h - 12),
+                        }}
+                      />
+                    )}
                     {[
                       { key: "resize-nw", left: selectionBox.x - 5, top: selectionBox.y - 5, cursor: "nwse-resize" },
                       { key: "resize-n", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y - 5, cursor: "ns-resize" },
@@ -1269,9 +1537,10 @@ export default function PdfReviewer() {
               </div>
             )}
           </div>
+          </div>
 
           {/* Sidebar */}
-          <aside className="w-full shrink-0 lg:col-start-3 lg:row-span-2">
+          <aside className="w-full shrink-0 lg:w-[400px]">
             <h2 className="mb-2 text-sm font-semibold text-neutral-800 dark:text-neutral-200">批注</h2>
 
             {creatingSelectionAnnotation && (
