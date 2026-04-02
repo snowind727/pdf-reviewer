@@ -4,6 +4,7 @@ import { z } from "zod";
 import { EDITOR_PUBLISHING_SPEC } from "@/lib/editor-spec";
 import { readMinimaxLocalConfig } from "@/lib/minimax-local-config";
 import { normalizeIssueKind, repairJsonStringInnerQuotes } from "@/lib/review-types";
+import { arkChatCompletion } from "@/lib/volcengine-ark";
 
 const DEFAULT_ANTHROPIC_BASE = "https://api.minimaxi.com/anthropic";
 const DEFAULT_MODEL = "MiniMax-M2.7";
@@ -22,6 +23,7 @@ const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
 const bodySchema = z.object({
   excerpt: z.string().min(1).max(500),
   pageText: z.string().min(1).max(50000),
+  provider: z.enum(["minimax", "doubao"]).optional(),
 });
 
 const suggestSchema = z.object({
@@ -107,7 +109,91 @@ export async function POST(req: Request) {
     );
   }
 
-  const { excerpt, pageText } = parsed.data;
+  const { excerpt, pageText, provider = "minimax" } = parsed.data;
+  const userContent = `--- 当前摘录 ---\n${excerpt}\n\n--- 页面文本 ---\n${pageText}`;
+
+  if (provider === "doubao") {
+    try {
+      const ark = await arkChatCompletion({
+        system: SYSTEM,
+        user: userContent,
+        maxTokens: 1200,
+        temperature: 0.2,
+        timeoutMs: 120_000,
+        logPrefix: "[suggest-edit]",
+      });
+
+      if (!ark.ok) {
+        const statusOut =
+          ark.status === 503 ? 503 : ark.status === 504 ? 504 : 502;
+        if (ark.status === 503) {
+          return NextResponse.json({ error: ark.detail }, { status: 503 });
+        }
+        return NextResponse.json(
+          {
+            error: "模型接口错误",
+            status: ark.status,
+            detail: ark.detail,
+            requestId: ark.requestId,
+          },
+          { status: statusOut },
+        );
+      }
+
+      const raw = ark.text.trim();
+      if (!raw) {
+        return NextResponse.json({ error: "模型未返回文本内容" }, { status: 502 });
+      }
+      console.log("[suggest-edit] AI 模型输出文本（", raw.length, "字符）:");
+      console.log(raw);
+
+      let parsedSuggestion: unknown;
+      try {
+        parsedSuggestion = JSON.parse(raw);
+      } catch (first) {
+        try {
+          parsedSuggestion = JSON.parse(repairJsonStringInnerQuotes(raw));
+        } catch {
+          throw first;
+        }
+      }
+
+      const result = suggestSchema.parse(parsedSuggestion);
+      const normalizedKind = normalizeIssueKind({
+        excerpt,
+        reason: result.reason ?? "",
+        suggestion: result.suggestion,
+        severity: result.kind,
+      });
+      console.log("[suggest-edit] 解析成功:", {
+        suggestion: result.suggestion.trim(),
+        reason: result.reason?.trim() ?? "",
+        kind: normalizedKind,
+      });
+      console.log("[suggest-edit] ========== AI 请求结束（成功） ==========");
+      return NextResponse.json({
+        suggestion: result.suggestion.trim(),
+        reason: result.reason?.trim() ?? "",
+        kind: normalizedKind,
+      });
+    } catch (e) {
+      const isTimeout = e instanceof DOMException && e.name === "TimeoutError";
+      const isZod = e instanceof z.ZodError;
+      const message = isTimeout
+        ? "AI 建议超时，请重试"
+        : isZod
+          ? `AI 返回结构不符合预期：${e.issues.map((x) => x.message).join("；")}`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      console.log("[suggest-edit] 请求异常:", message);
+      return NextResponse.json(
+        { error: message },
+        { status: isTimeout ? 504 : 500 },
+      );
+    }
+  }
+
   const local = readMinimaxLocalConfig();
   const apiKey =
     process.env.MINIMAX_API_KEY?.trim() ||
@@ -140,7 +226,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "未配置 API Key" }, { status: 503 });
   }
 
-  const userContent = `--- 当前摘录 ---\n${excerpt}\n\n--- 页面文本 ---\n${pageText}`;
   const url = `${base}/v1/messages`;
   const anthropicBody = {
     model,
@@ -190,8 +275,6 @@ export async function POST(req: Request) {
       responseText = await res.text();
       console.log("[suggest-edit] ---------- AI 响应 ----------");
       console.log("[suggest-edit] HTTP 状态:", res.status, " 响应长度:", responseText.length, "字符");
-      console.log("[suggest-edit] 响应原文:");
-      console.log(responseText);
 
       try {
         data = JSON.parse(responseText) as AnthropicMessagesResponse;

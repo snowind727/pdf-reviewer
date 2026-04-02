@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { readMinimaxLocalConfig } from "@/lib/minimax-local-config";
 import { normalizeIssueKind, parseReviewJson } from "@/lib/review-types";
+import { arkChatCompletion } from "@/lib/volcengine-ark";
 import { EDITOR_PUBLISHING_SPEC } from "@/lib/editor-spec";
 
 /** 国内文档默认基址：https://platform.minimaxi.com/docs/api-reference/text-anthropic-api */
@@ -25,6 +26,7 @@ const bodySchema = z.object({
   pageIndex: z.number().int().nonnegative(),
   text: z.string().max(50000),
   mode: reviewModeSchema.optional(),
+  provider: z.enum(["minimax", "doubao"]).optional(),
 });
 
 /** 任务指令 + JSON 输出格式（与编辑规范拼接组成完整 system prompt） */
@@ -153,7 +155,97 @@ export async function POST(req: Request) {
     );
   }
 
-  const { text, mode = "precise" } = parsed.data;
+  const { text, mode = "precise", provider = "minimax" } = parsed.data;
+
+  const systemPrompt = buildSystemPrompt(mode);
+  const temperature = REVIEW_MODE_CONFIG[mode].temperature;
+  const userContent = `--- 页面文本 ---\n${text}`;
+
+  if (!text.trim()) {
+    return NextResponse.json(
+      { issues: [], notice: "本页无可用文本层，无法精确定位；可更换为可复制文本的 PDF。" },
+      { status: 200 },
+    );
+  }
+
+  if (provider === "doubao") {
+    try {
+      const ark = await arkChatCompletion({
+        system: systemPrompt,
+        user: userContent,
+        maxTokens: 8192,
+        temperature,
+        timeoutMs: 120_000,
+        logPrefix: "[review-page]",
+        reviewModeLog: {
+          label: REVIEW_MODE_CONFIG[mode].label,
+          modeKey: mode,
+        },
+      });
+
+      if (!ark.ok) {
+        const statusOut =
+          ark.status === 503 ? 503 : ark.status === 504 ? 504 : 502;
+        if (ark.status === 503) {
+          return NextResponse.json({ error: ark.detail }, { status: 503 });
+        }
+        return NextResponse.json(
+          {
+            error: "模型接口错误",
+            status: ark.status,
+            detail: ark.detail,
+            requestId: ark.requestId,
+          },
+          { status: statusOut },
+        );
+      }
+
+      const raw = ark.text;
+      console.log("[review-page] AI 模型输出文本（", raw.length, "字符）:");
+      console.log(raw);
+
+      try {
+        const review = parseReviewJson(raw);
+        const normalized = {
+          issues: review.issues.map((issue) => ({
+            excerpt: issue.excerpt,
+            reason: issue.reason,
+            suggestion: issue.suggestion?.trim() || "",
+            kind: normalizeIssueKind(issue),
+          })),
+        };
+        console.log("[review-page] 解析成功，issues:", normalized.issues.length, "条");
+        console.log("[review-page] ========== AI 请求结束（成功） ==========");
+        return NextResponse.json(normalized);
+      } catch (parseErr) {
+        console.log(
+          "[review-page] JSON 解析失败:",
+          parseErr instanceof Error ? parseErr.message : parseErr,
+        );
+        return NextResponse.json(
+          { error: "模型返回的 JSON 无法解析", raw: raw.slice(0, 800) },
+          { status: 502 },
+        );
+      }
+    } catch (e) {
+      const isTimeout = e instanceof DOMException && e.name === "TimeoutError";
+      const isAbort = e instanceof DOMException && e.name === "AbortError";
+      const rawMsg = e instanceof Error ? e.message : String(e);
+      const cause = (e as { cause?: unknown })?.cause;
+      const causeMsg = cause instanceof Error ? ` [cause: ${cause.message}]` : "";
+      const message = isTimeout
+        ? `AI 接口超时（120s），请重试`
+        : isAbort
+          ? "请求被取消"
+          : rawMsg + causeMsg;
+
+      console.log("[review-page] 请求异常:", message);
+      return NextResponse.json(
+        { error: message },
+        { status: isTimeout ? 504 : 500 },
+      );
+    }
+  }
 
   const local = readMinimaxLocalConfig();
   const apiKey =
@@ -183,27 +275,15 @@ export async function POST(req: Request) {
     );
   }
 
-  const systemPrompt = buildSystemPrompt(mode);
-  const temperature = REVIEW_MODE_CONFIG[mode].temperature;
-
   if (!apiKey) {
     return NextResponse.json(
       {
         error:
           "未配置 API Key：请在仓库根目录复制 minimax.local.example.json 为 minimax.local.json 并填写 apiKey，或设置环境变量 MINIMAX_API_KEY",
       },
-      { status: 503 }
+      { status: 503 },
     );
   }
-
-  if (!text.trim()) {
-    return NextResponse.json(
-      { issues: [], notice: "本页无可用文本层，无法精确定位；可更换为可复制文本的 PDF。" },
-      { status: 200 }
-    );
-  }
-
-  const userContent = `--- 页面文本 ---\n${text}`;
 
   const url = `${base}/v1/messages`;
 
@@ -261,8 +341,6 @@ export async function POST(req: Request) {
 
       console.log("[review-page] ---------- AI 响应 ----------");
       console.log("[review-page] HTTP 状态:", res.status, " 响应长度:", responseText.length, "字符");
-      console.log("[review-page] 响应原文:");
-      console.log(responseText);
 
       try {
         data = JSON.parse(responseText) as AnthropicMessagesResponse;

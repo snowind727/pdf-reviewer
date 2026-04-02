@@ -22,6 +22,9 @@ import {
 } from "@/lib/pdf-text-match";
 import type { Annotation, IssueKind, NormalizedReviewIssue } from "@/lib/review-types";
 import { copyTextToClipboard } from "@/lib/copy-text";
+
+/** 豆包「审稿提示」临时覆盖稿，仅当前浏览器标签有效，关闭标签后失效 */
+const DOUBAO_SPEC_SESSION_KEY = "pdf-reviewer:doubao-editor-spec-override";
 import {
   annotateTextLayerCharRanges,
   computeDomHighlightRects,
@@ -36,6 +39,7 @@ import {
 
 type ScreenAnnotation = Annotation & { rects: ScreenRect[] };
 type ReviewMode = "precise" | "discover-more";
+type ReviewProvider = "minimax" | "doubao";
 
 function highlightBgClass(kind: IssueKind): string {
   return kind === "error" ? "bg-red-500/35" : "bg-sky-400/30";
@@ -105,6 +109,7 @@ export default function PdfReviewer() {
 
   const [loadingAi, setLoadingAi] = useState(false);
   const [reviewMode, setReviewMode] = useState<ReviewMode>("precise");
+  const [reviewProvider, setReviewProvider] = useState<ReviewProvider>("minimax");
   const [batchReviewCount, setBatchReviewCount] = useState(3);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
@@ -113,7 +118,10 @@ export default function PdfReviewer() {
   } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{
+    text: string;
+    variant: "warning" | "success";
+  } | null>(null);
 
   /* --- Editing state ---------------------------------------------- */
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -144,8 +152,17 @@ export default function PdfReviewer() {
   const [copySelectionFeedback, setCopySelectionFeedback] = useState(false);
   const [bingSearchText, setBingSearchText] = useState("");
   const [speechSearchText, setSpeechSearchText] = useState("");
+  const [doubaoSearchText, setDoubaoSearchText] = useState("");
+  /** true：复制编校规范（editor-spec.md）+ 文本框；false：仅复制文本框 */
+  const [doubaoAttachSpec, setDoubaoAttachSpec] = useState(true);
+  /** 缓存 GET /api/editor-spec，避免每次点击都请求 */
+  const editorSpecCacheRef = useRef<string | null>(null);
+  /** 回车打开豆包前已写入剪贴板，提示用户在新标签粘贴 */
+  const [doubaoCopyHint, setDoubaoCopyHint] = useState(false);
+  const [doubaoSpecModalOpen, setDoubaoSpecModalOpen] = useState(false);
+  const [doubaoSpecDraft, setDoubaoSpecDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
-  const [dragOverTarget, setDragOverTarget] = useState<'bing' | 'speech' | null>(null);
+  const [dragOverTarget, setDragOverTarget] = useState<'bing' | 'speech' | 'doubao' | null>(null);
   const [isDraggingSelection, setIsDraggingSelection] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -178,8 +195,10 @@ export default function PdfReviewer() {
       const el = document.elementFromPoint(e.clientX, e.clientY);
       const bing = el?.closest("#bing-search-input");
       const speech = el?.closest("#speech-search-input");
+      const doubao = el?.closest("#doubao-search-input");
       if (bing) setDragOverTarget("bing");
       else if (speech) setDragOverTarget("speech");
+      else if (doubao) setDragOverTarget("doubao");
       else setDragOverTarget(null);
     };
 
@@ -189,6 +208,7 @@ export default function PdfReviewer() {
       if (text) {
         if (el?.closest("#bing-search-input")) setBingSearchText(text);
         else if (el?.closest("#speech-search-input")) setSpeechSearchText(text);
+        else if (el?.closest("#doubao-search-input")) setDoubaoSearchText(text);
       }
       setIsDraggingSelection(false);
       setDragOverTarget(null);
@@ -217,6 +237,21 @@ export default function PdfReviewer() {
       );
   }, []);
 
+  /* 预拉取编校规范，减少首次选择「加提示」时的等待 */
+  useEffect(() => {
+    void fetch("/api/editor-spec")
+      .then((r) => {
+        if (!r.ok) return;
+        return r.json() as Promise<{ spec: string }>;
+      })
+      .then((data) => {
+        if (data?.spec) editorSpecCacheRef.current = data.spec;
+      })
+      .catch(() => {
+        /* 静默失败，用户点击时再请求 */
+      });
+  }, []);
+
   /* --- File selection --------------------------------------------- */
   const onFile = useCallback(
     async (file: File | null) => {
@@ -232,6 +267,8 @@ export default function PdfReviewer() {
       setSelectionPopup(null);
       setCreatingSelectionAnnotation(null);
       setSpeechSearchText("");
+      setDoubaoSearchText("");
+      setDoubaoCopyHint(false);
       setEditingId(null);
       setPageNumber(1);
       setPageJumpInput("1");
@@ -683,6 +720,7 @@ export default function PdfReviewer() {
         body: JSON.stringify({
           excerpt: pending.excerpt,
           pageText: formattedText.slice(0, 48000),
+          provider: reviewProvider,
         }),
       });
       const data = await res.json();
@@ -710,7 +748,7 @@ export default function PdfReviewer() {
     } finally {
       setCreatingSelectionAnnotation(null);
     }
-  }, [loadPageText, pageNumber, selectionPopup]);
+  }, [loadPageText, pageNumber, reviewProvider, selectionPopup]);
 
   const copySelectionText = useCallback(async () => {
     if (!selectionPopup?.text) return;
@@ -737,6 +775,116 @@ export default function PdfReviewer() {
     window.open(url, "_blank", "noopener,noreferrer");
   }, [bingSearchText]);
 
+  const openDoubaoSpecModal = useCallback(async () => {
+    setError(null);
+    try {
+      let initial = "";
+      const stored =
+        typeof window !== "undefined"
+          ? sessionStorage.getItem(DOUBAO_SPEC_SESSION_KEY)
+          : null;
+      if (stored !== null) {
+        initial = stored;
+      } else {
+        if (editorSpecCacheRef.current === null) {
+          const res = await fetch("/api/editor-spec");
+          if (!res.ok) throw new Error("无法加载审稿规范");
+          const data = (await res.json()) as { spec?: string };
+          if (typeof data.spec !== "string" || !data.spec.trim()) {
+            throw new Error("审稿规范内容为空");
+          }
+          editorSpecCacheRef.current = data.spec;
+        }
+        initial = editorSpecCacheRef.current ?? "";
+      }
+      setDoubaoSpecDraft(initial);
+      setDoubaoSpecModalOpen(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加载审稿规范失败");
+    }
+  }, []);
+
+  const saveDoubaoSpecOverride = useCallback(() => {
+    const t = doubaoSpecDraft.trim();
+    try {
+      if (t === "") {
+        sessionStorage.removeItem(DOUBAO_SPEC_SESSION_KEY);
+      } else {
+        sessionStorage.setItem(DOUBAO_SPEC_SESSION_KEY, t);
+      }
+      setDoubaoSpecModalOpen(false);
+    } catch {
+      setError("无法写入浏览器缓存（请检查是否禁用本地存储）");
+    }
+  }, [doubaoSpecDraft]);
+
+  const restoreDoubaoSpecDefault = useCallback(async () => {
+    setError(null);
+    try {
+      sessionStorage.removeItem(DOUBAO_SPEC_SESSION_KEY);
+      editorSpecCacheRef.current = null;
+      const res = await fetch("/api/editor-spec");
+      if (!res.ok) throw new Error("无法加载审稿规范");
+      const data = (await res.json()) as { spec?: string };
+      if (typeof data.spec !== "string" || !data.spec.trim()) {
+        throw new Error("审稿规范内容为空");
+      }
+      editorSpecCacheRef.current = data.spec;
+      setDoubaoSpecDraft(data.spec);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "恢复默认失败");
+    }
+  }, []);
+
+  /**
+   * 先复制到剪贴板再打开豆包（不依赖对方 URL 参数；跨域无法代填输入框，粘贴最可靠）。
+   * 选择「加提示」时拼接 editor-spec（含 session 临时稿）与文本框内容。
+   */
+  const openDoubaoChat = useCallback(async () => {
+    const q = doubaoSearchText.trim();
+    if (!q) return;
+    setError(null);
+    let toCopy = q;
+    if (doubaoAttachSpec) {
+      try {
+        let spec: string;
+        let stored: string | null = null;
+        try {
+          stored = sessionStorage.getItem(DOUBAO_SPEC_SESSION_KEY);
+        } catch {
+          stored = null;
+        }
+        if (stored !== null && stored.trim() !== "") {
+          spec = stored;
+        } else {
+          if (editorSpecCacheRef.current === null) {
+            const res = await fetch("/api/editor-spec");
+            if (!res.ok) throw new Error("无法加载审稿规范");
+            const data = (await res.json()) as { spec?: string };
+            if (typeof data.spec !== "string" || !data.spec.trim()) {
+              throw new Error("审稿规范内容为空");
+            }
+            editorSpecCacheRef.current = data.spec;
+          }
+          spec = editorSpecCacheRef.current as string;
+        }
+        toCopy = `${spec}\n\n-------正文如下-------\n\n${q}`;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "加载审稿规范失败");
+        return;
+      }
+    }
+    try {
+      await copyTextToClipboard(toCopy);
+      setDoubaoCopyHint(true);
+      window.setTimeout(() => setDoubaoCopyHint(false), 5000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "复制失败，请手动复制框内文字后再打开豆包");
+      return;
+    }
+    window.open("https://www.doubao.com/chat/", "_blank", "noopener,noreferrer");
+  }, [doubaoSearchText, doubaoAttachSpec]);
+
   /* --- AI review -------------------------------------------------- */
   const reviewSinglePage = useCallback(async (targetPageNumber: number, mode: ReviewMode) => {
     const { flatText, formattedText } = await loadPageText(targetPageNumber);
@@ -744,6 +892,7 @@ export default function PdfReviewer() {
       pageIndex: targetPageNumber - 1,
       text: formattedText.slice(0, 48000),
       mode,
+      provider: reviewProvider,
     });
 
     const REVIEW_PAGE_ATTEMPTS = 3;
@@ -806,7 +955,7 @@ export default function PdfReviewer() {
     }
 
     throw new Error("AI审稿异常，请稍后再试");
-  }, [loadPageText]);
+  }, [loadPageText, reviewProvider]);
 
   const runAiReview = useCallback(async () => {
     if (!pdfDoc) return;
@@ -845,7 +994,15 @@ export default function PdfReviewer() {
       }
       setBatchReviewProgress({ done: total, total, currentPage: startPage + total - 1 });
       if (failedPages.length > 0) {
-        setNotice(`以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`);
+        setNotice({
+          text: `以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`,
+          variant: "warning",
+        });
+      } else {
+        setNotice({
+          text: `连续审稿已完成，共处理 ${total} 页。`,
+          variant: "success",
+        });
       }
     } finally {
       setBatchReviewProgress(null);
@@ -992,7 +1149,7 @@ export default function PdfReviewer() {
 
   const hasAnyAnnotations = Object.values(pageAnnotations).some((a) => a && a.length > 0);
   const maxBatchPages = Math.min(10, Math.max(0, numPages - pageNumber + 1));
-  const aiBusy = loadingAi || !!batchReviewProgress;
+  const aiBusy = loadingAi || !!batchReviewProgress || !!creatingSelectionAnnotation;
   const jumpToPage = useCallback(() => {
     const parsed = Number(pageJumpInput.trim());
     if (!Number.isFinite(parsed)) {
@@ -1041,6 +1198,19 @@ export default function PdfReviewer() {
               >
                 {loadingAi ? "审稿中…" : "AI 审稿（当前页）"}
               </button>
+              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
+                <span>模型</span>
+                <select
+                  value={reviewProvider}
+                  disabled={aiBusy || !pdfDoc}
+                  onChange={(e) => setReviewProvider(e.target.value as ReviewProvider)}
+                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                  title="MiniMax：minimax.local.json 或 MINIMAX_*；豆包：ARK_API_KEY"
+                >
+                  <option value="minimax">MiniMax</option>
+                  <option value="doubao">豆包</option>
+                </select>
+              </div>
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
                 <span>审稿模式</span>
                 <select
@@ -1099,7 +1269,18 @@ export default function PdfReviewer() {
             正在连续审核第 {batchReviewProgress.currentPage} 页，已完成 {batchReviewProgress.done} / {batchReviewProgress.total} 页。
           </p>
         )}
-        {notice && <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">{notice}</p>}
+        {notice && (
+          <p
+            className={
+              notice.variant === "success"
+                ? "mt-2 text-sm text-emerald-700 dark:text-emerald-400"
+                : "mt-2 text-sm text-amber-700 dark:text-amber-300"
+            }
+            role="status"
+          >
+            {notice.text}
+          </p>
+        )}
         {pdfjsError && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{pdfjsError}</p>}
         {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
       </header>
@@ -1145,6 +1326,7 @@ export default function PdfReviewer() {
                     "上传 PDF 后，可先用“AI 审稿（当前页）”快速扫描当前页。",
                     "如需批量处理，可从当前页起连续审核最多 10 页。",
                     "选中文本后可“复制文本”或直接“添加批注”。",
+                    "「豆包搜索」：Enter 或下方按钮会复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
                     "若某条 AI 批注无法在 PDF 文本层定位，仍会出现在右侧批注列表中，页面上不会高亮。",
                   ].map((item, index) => (
@@ -1158,6 +1340,60 @@ export default function PdfReviewer() {
                       <p className="text-sm leading-6 text-neutral-700 dark:text-neutral-300">{item}</p>
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {doubaoSpecModalOpen && (
+            <div className="fixed inset-0 z-[41] flex items-center justify-center bg-black/40 px-4">
+              <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-3xl border border-neutral-200 bg-white shadow-2xl dark:border-neutral-800 dark:bg-neutral-950">
+                <div className="flex shrink-0 items-start justify-between gap-4 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800">
+                  <div>
+                    <h2 className="text-lg font-semibold text-neutral-950 dark:text-neutral-50">修改审稿提示词</h2>
+                    <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                      仅保存在本标签页缓存；关闭标签或新开会重新从服务器读取。复制到豆包时优先使用此处内容。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDoubaoSpecModalOpen(false)}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-600 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    关闭
+                  </button>
+                </div>
+                <textarea
+                  value={doubaoSpecDraft}
+                  onChange={(e) => setDoubaoSpecDraft(e.target.value)}
+                  className="min-h-[min(50vh,320px)] flex-1 resize-y border-0 bg-white px-5 py-3 text-sm leading-relaxed text-neutral-900 outline-none dark:bg-neutral-950 dark:text-neutral-100"
+                  placeholder="审稿规范全文…"
+                  spellCheck={false}
+                />
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-neutral-200 px-5 py-3 dark:border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => void restoreDoubaoSpecDefault()}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    恢复默认
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDoubaoSpecModalOpen(false);
+                    }}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveDoubaoSpecOverride}
+                    className="rounded-xl bg-violet-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-violet-700"
+                  >
+                    保存
+                  </button>
                 </div>
               </div>
             </div>
@@ -1218,6 +1454,78 @@ export default function PdfReviewer() {
                     }`}
                   />
                   <p className="mt-3 text-xs text-amber-900/75 dark:text-amber-100/60">按 Enter 搜索，按 Shift + Enter 换行。</p>
+                </div>
+              </section>
+
+              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-violet-200 bg-[radial-gradient(circle_at_top_left,_rgba(196,181,253,0.45),_transparent_36%),linear-gradient(180deg,rgba(245,243,255,0.98),rgba(250,245,255,0.98))] p-5 shadow-sm dark:border-violet-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(139,92,246,0.16),_transparent_36%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(3,7,18,0.98))]">
+                <div className="pointer-events-none absolute -right-6 bottom-8 h-20 w-20 rounded-full bg-violet-300/35 blur-3xl dark:bg-violet-500/10" />
+                <div className="relative flex h-full flex-col">
+                  <button
+                    type="button"
+                    onClick={() => void openDoubaoSpecModal()}
+                    className="absolute right-0 top-0 z-10 text-[11px] font-normal text-violet-600 underline underline-offset-2 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300"
+                  >
+                    修改提示
+                  </button>
+                  <div className="flex min-w-0 flex-nowrap items-center gap-2 pr-16">
+                    <h2 className="shrink-0 text-xl font-semibold tracking-tight text-violet-950 dark:text-violet-50">
+                      豆包搜索
+                    </h2>
+                    <select
+                      value={doubaoAttachSpec ? "with-spec" : "no-spec"}
+                      onChange={(e) => setDoubaoAttachSpec(e.target.value === "with-spec")}
+                      className="shrink-0 rounded-lg border border-violet-200/90 bg-white px-2 py-1 text-xs font-medium text-violet-950 shadow-sm outline-none focus:border-violet-400 dark:border-violet-700 dark:bg-neutral-950 dark:text-violet-100"
+                      aria-label="加提示或不提示"
+                    >
+                      <option value="with-spec">加提示</option>
+                      <option value="no-spec">不提示</option>
+                    </select>
+                  </div>
+                  <textarea
+                    id="doubao-search-input"
+                    value={doubaoSearchText}
+                    onChange={(e) => setDoubaoSearchText(e.target.value)}
+                    placeholder="输入要在豆包中发送的内容"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        void openDoubaoChat();
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                      setDragOverTarget("doubao");
+                    }}
+                    onDragLeave={() => setDragOverTarget((v) => (v === "doubao" ? null : v))}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const text = e.dataTransfer.getData("text/plain");
+                      if (text) setDoubaoSearchText(text);
+                      setDragOverTarget(null);
+                    }}
+                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-violet-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                      dragOverTarget === "doubao"
+                        ? "border-violet-500 ring-2 ring-violet-300 dark:border-violet-400 dark:ring-violet-500/40"
+                        : "border-violet-200 dark:border-violet-800"
+                    }`}
+                  />
+                  <p className="mt-3 text-xs leading-relaxed text-violet-900/80 dark:text-violet-200/70">
+                    按 Enter 或下方按钮：会将本框内容复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。
+                  </p>
+                  {doubaoCopyHint && (
+                    <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                      已复制，请在新开的豆包页中粘贴。
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    disabled={!doubaoSearchText.trim()}
+                    onClick={() => void openDoubaoChat()}
+                    className="mt-2 w-full rounded-xl border border-violet-300/80 bg-white/80 px-3 py-2 text-xs font-medium text-violet-900 transition hover:bg-violet-50 disabled:opacity-40 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-100 dark:hover:bg-violet-950/70"
+                  >
+                    复制并打开豆包
+                  </button>
                 </div>
               </section>
 

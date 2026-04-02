@@ -45,3 +45,5 @@ public/pdfjs/*.mjs
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.cursor/
