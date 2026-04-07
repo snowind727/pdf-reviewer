@@ -67,7 +67,7 @@ const ARK_MODELS_RAW: readonly ArkModelDefinition[] = [
   {
     id: "ep-m-20260403183338-rwpqb",
     label: "DeepSeek V3",
-    api: "responses",
+    api: "chat",
   },
   {
     id: "ep-m-20260403110728-mwwdv",
