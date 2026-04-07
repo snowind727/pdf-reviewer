@@ -20,6 +20,10 @@ import {
   charRangeToPdfBoxes,
   resolveIssueCharRange,
 } from "@/lib/pdf-text-match";
+import {
+  AI_REVIEW_MODELS,
+  DEFAULT_AI_REVIEW_MODEL_ID,
+} from "@/lib/ai-review-models";
 import type { Annotation, IssueKind, NormalizedReviewIssue } from "@/lib/review-types";
 import { copyTextToClipboard } from "@/lib/copy-text";
 
@@ -39,7 +43,6 @@ import {
 
 type ScreenAnnotation = Annotation & { rects: ScreenRect[] };
 type ReviewMode = "precise" | "discover-more";
-type ReviewProvider = "minimax" | "doubao";
 
 function highlightBgClass(kind: IssueKind): string {
   return kind === "error" ? "bg-red-500/35" : "bg-sky-400/30";
@@ -109,7 +112,7 @@ export default function PdfReviewer() {
 
   const [loadingAi, setLoadingAi] = useState(false);
   const [reviewMode, setReviewMode] = useState<ReviewMode>("precise");
-  const [reviewProvider, setReviewProvider] = useState<ReviewProvider>("minimax");
+  const [aiModelId, setAiModelId] = useState(DEFAULT_AI_REVIEW_MODEL_ID);
   const [batchReviewCount, setBatchReviewCount] = useState(3);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
@@ -720,7 +723,7 @@ export default function PdfReviewer() {
         body: JSON.stringify({
           excerpt: pending.excerpt,
           pageText: formattedText.slice(0, 48000),
-          provider: reviewProvider,
+          model: aiModelId,
         }),
       });
       const data = await res.json();
@@ -748,7 +751,7 @@ export default function PdfReviewer() {
     } finally {
       setCreatingSelectionAnnotation(null);
     }
-  }, [loadPageText, pageNumber, reviewProvider, selectionPopup]);
+  }, [aiModelId, loadPageText, pageNumber, selectionPopup]);
 
   const copySelectionText = useCallback(async () => {
     if (!selectionPopup?.text) return;
@@ -892,7 +895,7 @@ export default function PdfReviewer() {
       pageIndex: targetPageNumber - 1,
       text: formattedText.slice(0, 48000),
       mode,
-      provider: reviewProvider,
+      model: aiModelId,
     });
 
     const REVIEW_PAGE_ATTEMPTS = 3;
@@ -955,7 +958,7 @@ export default function PdfReviewer() {
     }
 
     throw new Error("AI审稿异常，请稍后再试");
-  }, [loadPageText, reviewProvider]);
+  }, [aiModelId, loadPageText]);
 
   const runAiReview = useCallback(async () => {
     if (!pdfDoc) return;
@@ -1201,14 +1204,17 @@ export default function PdfReviewer() {
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
                 <span>模型</span>
                 <select
-                  value={reviewProvider}
+                  value={aiModelId}
                   disabled={aiBusy || !pdfDoc}
-                  onChange={(e) => setReviewProvider(e.target.value as ReviewProvider)}
-                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
-                  title="MiniMax：minimax.local.json 或 MINIMAX_*；豆包：ARK_API_KEY"
+                  onChange={(e) => setAiModelId(e.target.value)}
+                  className="max-w-[min(100vw-6rem,18rem)] rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                  title="MiniMax 需 MINIMAX_API_KEY；方舟需 ARK_API_KEY；列表见 lib/ai-review-models.ts"
                 >
-                  <option value="minimax">MiniMax</option>
-                  <option value="doubao">豆包</option>
+                  {AI_REVIEW_MODELS.map((m, i) => (
+                    <option key={`ai-opt-${i}-${m.id}`} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">

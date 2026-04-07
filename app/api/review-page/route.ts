@@ -1,22 +1,18 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { readMinimaxLocalConfig } from "@/lib/minimax-local-config";
 import { normalizeIssueKind, parseReviewJson } from "@/lib/review-types";
+import {
+  AI_REVIEW_MODEL_ZOD_ENUM,
+  DEFAULT_AI_REVIEW_MODEL_ID,
+  getAiReviewProvider,
+} from "@/lib/ai-review-models";
+import {
+  DEFAULT_MINIMAX_MODEL_ID,
+  MINIMAX_DEFAULT_ANTHROPIC_BASE,
+  resolveMinimaxAnthropicModelId,
+} from "@/lib/minimax-models";
 import { arkChatCompletion } from "@/lib/volcengine-ark";
 import { EDITOR_PUBLISHING_SPEC } from "@/lib/editor-spec";
-
-/** 国内文档默认基址：https://platform.minimaxi.com/docs/api-reference/text-anthropic-api */
-const DEFAULT_ANTHROPIC_BASE = "https://api.minimaxi.com/anthropic";
-const DEFAULT_MODEL = "MiniMax-M2.7";
-const SUPPORTED_ANTHROPIC_MODELS = new Set([
-  "MiniMax-M2.7",
-  "MiniMax-M2.7-highspeed",
-  "MiniMax-M2.5",
-  "MiniMax-M2.5-highspeed",
-  "MiniMax-M2.1",
-  "MiniMax-M2.1-highspeed",
-  "MiniMax-M2",
-]);
 /** 含 529：部分上游在负载高时返回 529，与 MiniMax overloaded 类错误 */
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
 const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
@@ -26,7 +22,8 @@ const bodySchema = z.object({
   pageIndex: z.number().int().nonnegative(),
   text: z.string().max(50000),
   mode: reviewModeSchema.optional(),
-  provider: z.enum(["minimax", "doubao"]).optional(),
+  /** 统一模型，见 lib/ai-review-models.ts */
+  model: z.enum(AI_REVIEW_MODEL_ZOD_ENUM).optional(),
 });
 
 /** 任务指令 + JSON 输出格式（与编辑规范拼接组成完整 system prompt） */
@@ -155,7 +152,11 @@ export async function POST(req: Request) {
     );
   }
 
-  const { text, mode = "precise", provider = "minimax" } = parsed.data;
+  const { text, mode = "precise", model: modelParam } = parsed.data;
+  const modelId = modelParam ?? DEFAULT_AI_REVIEW_MODEL_ID;
+  const provider = getAiReviewProvider(modelId);
+  const minimaxModel = provider === "minimax" ? modelId : undefined;
+  const arkModel = provider === "doubao" ? modelId : undefined;
 
   const systemPrompt = buildSystemPrompt(mode);
   const temperature = REVIEW_MODE_CONFIG[mode].temperature;
@@ -181,6 +182,7 @@ export async function POST(req: Request) {
           label: REVIEW_MODE_CONFIG[mode].label,
           modeKey: mode,
         },
+        arkModelId: arkModel,
       });
 
       if (!ark.ok) {
@@ -247,39 +249,33 @@ export async function POST(req: Request) {
     }
   }
 
-  const local = readMinimaxLocalConfig();
   const apiKey =
     process.env.MINIMAX_API_KEY?.trim() ||
-    process.env.AI_API_KEY?.trim() ||
-    local.apiKey;
+    process.env.AI_API_KEY?.trim();
   const base = (
-    process.env.MINIMAX_ANTHROPIC_BASE?.trim() ||
-    local.anthropicBase ||
-    DEFAULT_ANTHROPIC_BASE
+    process.env.MINIMAX_ANTHROPIC_BASE?.trim() || MINIMAX_DEFAULT_ANTHROPIC_BASE
   ).replace(/\/$/, "");
-  const configuredModel =
+  const rawPreferred =
+    minimaxModel?.trim() ||
     process.env.MINIMAX_MODEL?.trim() ||
-    local.model ||
-    DEFAULT_MODEL;
-  const model = SUPPORTED_ANTHROPIC_MODELS.has(configuredModel)
-    ? configuredModel
-    : DEFAULT_MODEL;
+    DEFAULT_MINIMAX_MODEL_ID;
+  const model = resolveMinimaxAnthropicModelId({
+    requestModel: minimaxModel,
+    envModel: process.env.MINIMAX_MODEL,
+  });
   const anthropicVersion =
-    process.env.ANTHROPIC_VERSION?.trim() ||
-    local.anthropicVersion ||
-    "2023-06-01";
+    process.env.ANTHROPIC_VERSION?.trim() || "2023-06-01";
 
-  if (configuredModel !== model) {
+  if (rawPreferred !== model) {
     console.log(
-      `[review-page] 配置模型 ${configuredModel} 不在 Anthropic 兼容接口支持列表内，已自动回退到 ${model}`,
+      `[review-page] 配置模型 ${rawPreferred} 不在支持列表内，已自动回退到 ${model}`,
     );
   }
 
   if (!apiKey) {
     return NextResponse.json(
       {
-        error:
-          "未配置 API Key：请在仓库根目录复制 minimax.local.example.json 为 minimax.local.json 并填写 apiKey，或设置环境变量 MINIMAX_API_KEY",
+        error: "未配置 API Key：请设置环境变量 MINIMAX_API_KEY（或 AI_API_KEY）",
       },
       { status: 503 },
     );

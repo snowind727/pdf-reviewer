@@ -1,6 +1,0 @@
-{
-  "apiKey": "在此填写 MiniMax 控制台申请的 API Key",
-  "anthropicBase": "https://api.minimaxi.com/anthropic",
-  "model": "MiniMax-M2.7",
-  "anthropicVersion": "2023-06-01"
-}

@@ -4,16 +4,15 @@
 
 ## 运行
 
-1. **配置 MiniMax（本地推荐）**  
-   复制 `minimax.local.example.json` 为 **`minimax.local.json`**（该文件已加入 `.gitignore`，不会进 Git），填写 `apiKey`。可选字段：`anthropicBase`、`model`、`anthropicVersion`。  
-   默认 `anthropicBase` 为国内文档中的 **`https://api.minimaxi.com/anthropic`**，与 [Anthropic API 兼容](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api) 一致。`model` 建议使用该兼容接口支持的模型（默认 `MiniMax-M2.7`）。
+1. **配置密钥**  
+   复制 `.env.example` 为 **`.env.local`**，建议同时填写（切换模型时即需对应密钥）：
+   - **`MINIMAX_API_KEY`**：M2.5 / M2.1 / M2.7 等 MiniMax 模型（也可用 **`AI_API_KEY`**）。
+   - **`ARK_API_KEY`**：豆包 / DeepSeek 等方舟模型（兼容别名 **`DOUBAO_API_KEY`**）。  
+   页面上「模型」为统一列表，在 **`lib/ai-review-models.ts`** 中维护（先 MiniMax、后方舟，与 **`lib/minimax-models.ts`** / **`lib/ark-models.ts`** 配置顺序对齐后可再按需微调）。
 
-2. **或改用环境变量（可选）**  
-   环境变量优先级高于 `minimax.local.json`：`MINIMAX_API_KEY`、`MINIMAX_ANTHROPIC_BASE`、`MINIMAX_MODEL`、`ANTHROPIC_VERSION`。参见 `.env.example`。
+2. 审稿请求为 Anthropic Messages 形态：`POST {anthropicBase}/v1/messages`，请求头含 `x-api-key`、`anthropic-version`。
 
-3. 审稿请求为 Anthropic Messages 形态：`POST {anthropicBase}/v1/messages`，请求头含 `x-api-key`、`anthropic-version`。
-
-4. `npm install`（会执行 `postinstall`，将 `pdfjs-dist` 复制到 **`public/pdfjs/`**，供浏览器直接加载，避免 Next 打包 pdf.js 崩溃）→ `npm run dev` → 打开 [http://localhost:3000](http://localhost:3000)。若 404，可手动执行：`node scripts/copy-pdfjs.mjs`。
+3. `npm install`（会执行 `postinstall`，将 `pdfjs-dist` 复制到 **`public/pdfjs/`**，供浏览器直接加载，避免 Next 打包 pdf.js 崩溃）→ `npm run dev` → 打开 [http://localhost:3000](http://localhost:3000)。若 404，可手动执行：`node scripts/copy-pdfjs.mjs`。
 
 ## 可选：离线中文字体
 
