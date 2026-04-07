@@ -110,10 +110,9 @@ export default function PdfReviewer() {
   const [textLayerReady, setTextLayerReady] = useState(false);
   const [screenAnnotations, setScreenAnnotations] = useState<ScreenAnnotation[]>([]);
 
-  const [loadingAi, setLoadingAi] = useState(false);
-  const [reviewMode, setReviewMode] = useState<ReviewMode>("precise");
+  const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
   const [aiModelId, setAiModelId] = useState(DEFAULT_AI_REVIEW_MODEL_ID);
-  const [batchReviewCount, setBatchReviewCount] = useState(3);
+  const [batchReviewCount, setBatchReviewCount] = useState(1);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
     total: number;
@@ -962,28 +961,14 @@ export default function PdfReviewer() {
 
   const runAiReview = useCallback(async () => {
     if (!pdfDoc) return;
-    setError(null);
-    setNotice(null);
-    setLoadingAi(true);
-    try {
-      await reviewSinglePage(pageNumber, reviewMode);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "审稿失败");
-    } finally {
-      setLoadingAi(false);
-    }
-  }, [pageNumber, pdfDoc, reviewMode, reviewSinglePage]);
-
-  const runBatchAiReview = useCallback(async () => {
-    if (!pdfDoc) return;
     const startPage = pageNumber;
     const total = Math.min(10, Math.max(1, numPages - startPage + 1), Math.max(1, batchReviewCount));
-    if (total <= 1) return;
 
     setError(null);
     setNotice(null);
     setBatchReviewProgress({ done: 0, total, currentPage: startPage });
     const failedPages: number[] = [];
+    let firstFailedMessage: string | null = null;
     try {
       for (let offset = 0; offset < total; offset += 1) {
         const targetPageNumber = startPage + offset;
@@ -992,21 +977,30 @@ export default function PdfReviewer() {
           await reviewSinglePage(targetPageNumber, reviewMode);
         } catch (e) {
           failedPages.push(targetPageNumber);
+          if (!firstFailedMessage && e instanceof Error) {
+            firstFailedMessage = e.message;
+          }
           console.error(`[batch-review] 第 ${targetPageNumber} 页审稿失败:`, e);
         }
       }
       setBatchReviewProgress({ done: total, total, currentPage: startPage + total - 1 });
       if (failedPages.length > 0) {
-        setNotice({
-          text: `以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`,
-          variant: "warning",
-        });
+        if (total === 1) {
+          setError(firstFailedMessage ?? `第 ${startPage} 页审稿失败`);
+        } else {
+          setNotice({
+            text: `以下页面审稿失败，但未影响后续页面：第 ${failedPages.join("、")} 页。`,
+            variant: "warning",
+          });
+        }
       } else {
         setNotice({
-          text: `连续审稿已完成，共处理 ${total} 页。`,
+          text: `AI审稿已完成，共处理 ${total} 页。`,
           variant: "success",
         });
       }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "审稿失败");
     } finally {
       setBatchReviewProgress(null);
     }
@@ -1152,7 +1146,7 @@ export default function PdfReviewer() {
 
   const hasAnyAnnotations = Object.values(pageAnnotations).some((a) => a && a.length > 0);
   const maxBatchPages = Math.min(10, Math.max(0, numPages - pageNumber + 1));
-  const aiBusy = loadingAi || !!batchReviewProgress || !!creatingSelectionAnnotation;
+  const aiBusy = !!batchReviewProgress || !!creatingSelectionAnnotation;
   const jumpToPage = useCallback(() => {
     const parsed = Number(pageJumpInput.trim());
     if (!Number.isFinite(parsed)) {
@@ -1172,7 +1166,7 @@ export default function PdfReviewer() {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
           <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
-            上传 PDF，支持当前页单页审稿，也支持从当前页起连续审稿最多 10 页；还可选中 PDF 文字后直接调用 AI 添加批注；导出 PDF 含高亮标注与批注。
+            上传 PDF，可从当前页起审稿 1 到 10 页；还可选中 PDF 文字后直接调用 AI 添加批注；导出 PDF 含高亮标注与批注。
           </p>
         </div>
 
@@ -1197,22 +1191,23 @@ export default function PdfReviewer() {
                 type="button"
                 disabled={aiBusy || !pdfDoc}
                 onClick={() => void runAiReview()}
-                className="rounded-xl bg-amber-500 px-4 py-3 text-sm font-medium text-white transition hover:bg-amber-600 disabled:opacity-50"
+                className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-medium text-white transition hover:bg-orange-600 disabled:opacity-50"
               >
-                {loadingAi ? "审稿中…" : "AI 审稿（当前页）"}
+                {batchReviewProgress
+                  ? `审稿中… ${batchReviewProgress.done}/${batchReviewProgress.total}`
+                  : "AI审稿"}
               </button>
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>模型</span>
+                <span>审稿页数</span>
                 <select
-                  value={aiModelId}
+                  value={Math.min(batchReviewCount, Math.max(1, maxBatchPages))}
                   disabled={aiBusy || !pdfDoc}
-                  onChange={(e) => setAiModelId(e.target.value)}
-                  className="max-w-[min(100vw-6rem,18rem)] rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
-                  title="MiniMax 需 MINIMAX_API_KEY；方舟需 ARK_API_KEY；列表见 lib/ai-review-models.ts"
+                  onChange={(e) => setBatchReviewCount(Number(e.target.value))}
+                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
                 >
-                  {AI_REVIEW_MODELS.map((m, i) => (
-                    <option key={`ai-opt-${i}-${m.id}`} value={m.id}>
-                      {m.label}
+                  {Array.from({ length: Math.max(1, maxBatchPages) }, (_, i) => i + 1).map((count) => (
+                    <option key={count} value={count}>
+                      {count} 页
                     </option>
                   ))}
                 </select>
@@ -1230,30 +1225,21 @@ export default function PdfReviewer() {
                 </select>
               </div>
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>连续审核</span>
+                <span>选择模型</span>
                 <select
-                  value={Math.min(batchReviewCount, Math.max(2, maxBatchPages))}
-                  disabled={aiBusy || maxBatchPages < 2}
-                  onChange={(e) => setBatchReviewCount(Number(e.target.value))}
-                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                  value={aiModelId}
+                  disabled={aiBusy || !pdfDoc}
+                  onChange={(e) => setAiModelId(e.target.value)}
+                  className="max-w-[min(100vw-6rem,18rem)] rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                  title="MiniMax 需 MINIMAX_API_KEY；方舟需 ARK_API_KEY；列表见 lib/ai-review-models.ts"
                 >
-                  {Array.from({ length: Math.max(0, maxBatchPages - 1) }, (_, i) => i + 2).map((count) => (
-                    <option key={count} value={count}>
-                      {count} 页
+                  {AI_REVIEW_MODELS.map((m, i) => (
+                    <option key={`ai-opt-${i}-${m.id}`} value={m.id}>
+                      {m.label}
                     </option>
                   ))}
                 </select>
               </div>
-              <button
-                type="button"
-                disabled={aiBusy || maxBatchPages < 2}
-                onClick={() => void runBatchAiReview()}
-                className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-medium text-white transition hover:bg-orange-600 disabled:opacity-50"
-              >
-                {batchReviewProgress
-                  ? `连续审稿中… ${batchReviewProgress.done}/${batchReviewProgress.total}`
-                  : "AI 审稿（从当前页起）"}
-              </button>
             </div>
           </div>
 
@@ -1272,7 +1258,7 @@ export default function PdfReviewer() {
 
         {batchReviewProgress && (
           <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">
-            正在连续审核第 {batchReviewProgress.currentPage} 页，已完成 {batchReviewProgress.done} / {batchReviewProgress.total} 页。
+            正在审稿第 {batchReviewProgress.currentPage} 页，已完成 {batchReviewProgress.done} / {batchReviewProgress.total} 页。
           </p>
         )}
         {notice && (
@@ -1329,8 +1315,8 @@ export default function PdfReviewer() {
                 </div>
                 <div className="mt-5 space-y-3">
                   {[
-                    "上传 PDF 后，可先用“AI 审稿（当前页）”快速扫描当前页。",
-                    "如需批量处理，可从当前页起连续审核最多 10 页。",
+                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 1 页。",
+                    "如需批量处理，可把审稿页数调大，从当前页起连续审核最多 10 页。",
                     "选中文本后可“复制文本”或直接“添加批注”。",
                     "「豆包搜索」：Enter 或下方按钮会复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
