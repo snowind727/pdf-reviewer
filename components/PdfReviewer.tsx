@@ -874,9 +874,6 @@ export default function PdfReviewer() {
           kind: annotationKind,
           suggestion: annotationSuggestion,
           reason: annotationReason,
-          id: "",
-          source: "selection-ai",
-          charRange: null,
         },
       );
 
