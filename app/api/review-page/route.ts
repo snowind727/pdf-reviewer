@@ -33,12 +33,19 @@ const TASK_INSTRUCTIONS = `
 当前任务：用户会提供 **PDF 某一页** 的纯文本（保留了原始排版的换行与段落）。请在该页范围内，依据以上规范发现问题并给出修改建议。单页无法核实的项（如全书术语统一、参考文献全文）请标 kind 为 suspected 并说明需扩展核对范围。
 
 必须只输出一个 JSON 对象，不要 Markdown，不要代码围栏。
-**JSON 语法硬性要求**：excerpt、suggestion、reason 等所有字符串值内禁止使用未转义的英文双引号 "（会破坏解析）。如需给词加引号，请用中文直角引号「」『』或书名号《》，或写成「改为：坚持生态优先」而不要用 "坚持生态优先"。
+**JSON 语法硬性要求**：excerpt、suggestion、reason 等所有字符串值内，若必须出现 ASCII 英文双引号 "，请写成转义形式 \\"。为避免解析风险，能不用引号就尽量不用；需要保留原文或说明改法时，也可以直接写成“改为：……”这类自然中文。
+
+**引号规范（极其重要）**：
+- 不要把「JSON 输出方便」误当成排版规范。JSON 需要的是**正确转义**，不是把普通双引号统一改成直角引号。
+- 对现代中文横排文本，普通引语、特指词、强调词通常优先使用“”和‘’，**不要默认建议改成「」『』**。
+- 只有在满足以下情形之一时，才建议改用「」『』：原文本来就是该体例；全文/本书明显采用繁体或港台体例；明确属于竖排或特殊排版规范。
+- 若当前摘录只是普通横排中文里的引号用法，除非确有上下文依据，否则不要仅因样式偏好提出“把双引号改为方引号/直角引号”的建议。
 
 **摘录与原文标点一致（极其重要）**：
 - 字段 excerpt 必须是你在「页面文本」里能搜到的**连续子串**，须与原文**逐字相同**，包括**一切标点与引号**：中文直角引号「」『』、弯引号“”‘’、书名号《》、顿号、全角符号等，均须与页面文本一致。
 - **禁止**为了「规范」而把原文里的中文引号改成英文直引号 " 或 '；**禁止**在 excerpt 里自行改写标点后再匹配。例如页面里是「贵州省创新「村BA」「村超」模式」或类似写法，excerpt 必须按页面文本原样摘录，不能把其中的「」改成 "。
-- 若问题与引号嵌套有关，仍须在 excerpt 中保留页面上的**实际字符**；仅在 suggestion、reason 中说明建议改成何种引号格式（那里用「」表述即可）。
+- 若问题与引号嵌套有关，仍须在 excerpt 中保留页面上的**实际字符**；仅在 suggestion、reason 中说明建议改成何种引号格式，但必须遵守上述“横排默认不用「」”规则，不可把「」当作默认答案。
+- 输出前请逐条自检：把每个 excerpt 当作普通字符串回看一遍，确认它能在「页面文本」中直接找到；如果找不到，说明你改写了原文或记错了字符，必须重写该条，仍找不到就删除该条。
 
 结构为：
 {"issues":[
@@ -88,6 +95,78 @@ type ReviewMode = keyof typeof REVIEW_MODE_CONFIG;
 
 function buildSystemPrompt(mode: ReviewMode): string {
   return `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}`;
+}
+
+function normalizeWhitespaceForMatch(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+function normalizeLooseComparableChar(char: string): string {
+  if (`“”「」"`.includes(char)) return `"`;
+  if (`‘’『』'`.includes(char)) return `'`;
+  return char;
+}
+
+function buildLooseComparableIndex(source: string): { normalized: string; indexMap: number[] } {
+  let normalized = "";
+  const indexMap: number[] = [];
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (/\s/u.test(char)) continue;
+    normalized += normalizeLooseComparableChar(char);
+    indexMap.push(i);
+  }
+  return { normalized, indexMap };
+}
+
+function findUniqueLooseMatch(pageText: string, excerpt: string): string | null {
+  const needle = excerpt.trim();
+  if (!needle) return null;
+
+  const haystack = buildLooseComparableIndex(pageText);
+  const comparableNeedle = buildLooseComparableIndex(needle).normalized;
+  if (!comparableNeedle) return null;
+
+  const firstIndex = haystack.normalized.indexOf(comparableNeedle);
+  if (firstIndex < 0) return null;
+  const secondIndex = haystack.normalized.indexOf(comparableNeedle, firstIndex + 1);
+  if (secondIndex >= 0) return null;
+
+  const start = haystack.indexMap[firstIndex];
+  const end = haystack.indexMap[firstIndex + comparableNeedle.length - 1];
+  if (start === undefined || end === undefined) return null;
+  return pageText.slice(start, end + 1).trim();
+}
+
+function canonicalizeExcerptToPageText(pageText: string, excerpt: string): string | null {
+  const needle = excerpt.trim();
+  if (!needle) return null;
+  if (pageText.includes(needle)) return needle;
+  if (normalizeWhitespaceForMatch(pageText).includes(normalizeWhitespaceForMatch(needle))) {
+    return needle;
+  }
+  return findUniqueLooseMatch(pageText, needle);
+}
+
+function sanitizeIssuesForPageText(pageText: string, review: ReturnType<typeof parseReviewJson>) {
+  return review.issues.flatMap((issue) => {
+    const canonicalExcerpt = canonicalizeExcerptToPageText(pageText, issue.excerpt);
+    if (!canonicalExcerpt) {
+      console.log("[review-page] 丢弃未命中原文的 issue:", {
+        excerpt: issue.excerpt,
+        suggestion: issue.suggestion?.slice(0, 120) ?? "",
+        reason: issue.reason.slice(0, 120),
+      });
+      return [];
+    }
+    if (canonicalExcerpt !== issue.excerpt) {
+      console.log("[review-page] 已将 excerpt 对齐回原文:", {
+        from: issue.excerpt,
+        to: canonicalExcerpt,
+      });
+    }
+    return [{ ...issue, excerpt: canonicalExcerpt }];
+  });
 }
 
 /** Anthropic Messages API 响应（MiniMax 兼容层，非流式） */
@@ -209,7 +288,7 @@ export async function POST(req: Request) {
       try {
         const review = parseReviewJson(raw);
         const normalized = {
-          issues: review.issues.map((issue) => ({
+          issues: sanitizeIssuesForPageText(text, review).map((issue) => ({
             excerpt: issue.excerpt,
             reason: issue.reason,
             suggestion: issue.suggestion?.trim() || "",
@@ -404,7 +483,7 @@ export async function POST(req: Request) {
     try {
       const review = parseReviewJson(raw);
       const normalized = {
-        issues: review.issues.map((issue) => ({
+        issues: sanitizeIssuesForPageText(text, review).map((issue) => ({
           excerpt: issue.excerpt,
           reason: issue.reason,
           suggestion: issue.suggestion?.trim() || "",

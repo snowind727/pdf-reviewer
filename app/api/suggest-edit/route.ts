@@ -24,6 +24,7 @@ const bodySchema = z.object({
 });
 
 const suggestSchema = z.object({
+  excerpt: z.string().optional(),
   suggestion: z.string(),
   reason: z.string().optional(),
   kind: z.string().optional(),
@@ -38,14 +39,19 @@ const SYSTEM = `${EDITOR_PUBLISHING_SPEC}
 要求：
 - 只聚焦该摘录，不要输出整页多条问题
 - 若该摘录明显存在语病、搭配不当、错别字、标点或表达问题，给出直接可执行的修改建议
+- 必须返回 excerpt 字段：填写这段摘录中真正有问题的**最短连续原文子串**。不要返回整段，除非整段本身就是问题点
+- excerpt 必须逐字来自用户框选摘录，也必须能在页面文本中直接找到；包括标点、引号在内都必须与原文一致，不能脑补或改写
+- 如果用户框选了一大段、但只有其中几个字词或一个短语有问题，只返回那几个字词或那个短语作为 excerpt
 - 若问题不够确定，可将 kind 设为 suspected；也允许写中文「错误」「疑似」，程序会自动归一
 - suggestion 只写正确内容或具体改法，不要解释原因，不要复述规则，不要写分析过程
-- suggestion 尽量短、直接、可落地；例如「改为：xxx」「删除：|」「将『A』改为『B』」
+- suggestion 尽量短、直接、可落地；例如「改为：xxx」「删除：|」「将“A”改为“B”」
+- 不要因为 JSON 输出或个人偏好，就把普通横排中文里的双引号默认改成直角引号「」；现代中文横排一般优先用“”和‘’，仅在原文体例、竖排、繁体或明确规范要求时，才建议改用「」『』
+- 若 suggestion 中必须出现 ASCII 英文双引号 "，请在 JSON 字符串里正确转义为 \\"；不要用把 " 改成「」的方式规避 JSON 转义
 - reason 用一句话简要说明原因，便于折叠展示
 - 不要输出 Markdown，不要代码围栏
 
 返回 JSON：
-{"suggestion":"改为：xxx","reason":"一句话原因","kind":"error 或 suspected"}`.trim();
+{"excerpt":"有问题的最短原文子串","suggestion":"改为：xxx","reason":"一句话原因","kind":"error 或 suspected"}`.trim();
 
 type AnthropicContentBlock =
   | { type: "text"; text: string }
@@ -88,6 +94,72 @@ function isRetryableFailure(
 ): boolean {
   const errorCode = parseMiniMaxErrorCode(data, responseText);
   return RETRYABLE_STATUS.has(status) || (errorCode ? RETRYABLE_ERROR_CODES.has(errorCode) : false);
+}
+
+function parseSuggestionJson(raw: string): unknown {
+  const trimmed = raw.trim();
+  const codeBlock = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const jsonStr = codeBlock ? codeBlock[1].trim() : trimmed;
+  try {
+    return JSON.parse(jsonStr);
+  } catch (first) {
+    try {
+      return JSON.parse(repairJsonStringInnerQuotes(jsonStr));
+    } catch {
+      throw first;
+    }
+  }
+}
+
+function normalizeWhitespaceForMatch(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+function normalizeLooseComparableChar(char: string): string {
+  if (`“”「」"`.includes(char)) return `"`;
+  if (`‘’『』'`.includes(char)) return `'`;
+  return char;
+}
+
+function buildLooseComparableIndex(source: string): { normalized: string; indexMap: number[] } {
+  let normalized = "";
+  const indexMap: number[] = [];
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (/\s/u.test(char)) continue;
+    normalized += normalizeLooseComparableChar(char);
+    indexMap.push(i);
+  }
+  return { normalized, indexMap };
+}
+
+function findUniqueLooseMatch(source: string, excerpt: string): string | null {
+  const needle = excerpt.trim();
+  if (!needle) return null;
+
+  const haystack = buildLooseComparableIndex(source);
+  const comparableNeedle = buildLooseComparableIndex(needle).normalized;
+  if (!comparableNeedle) return null;
+
+  const firstIndex = haystack.normalized.indexOf(comparableNeedle);
+  if (firstIndex < 0) return null;
+  const secondIndex = haystack.normalized.indexOf(comparableNeedle, firstIndex + 1);
+  if (secondIndex >= 0) return null;
+
+  const start = haystack.indexMap[firstIndex];
+  const end = haystack.indexMap[firstIndex + comparableNeedle.length - 1];
+  if (start === undefined || end === undefined) return null;
+  return source.slice(start, end + 1).trim();
+}
+
+function canonicalizeExcerpt(source: string, excerpt: string): string | null {
+  const needle = excerpt.trim();
+  if (!needle) return null;
+  if (source.includes(needle)) return needle;
+  if (normalizeWhitespaceForMatch(source).includes(normalizeWhitespaceForMatch(needle))) {
+    return needle;
+  }
+  return findUniqueLooseMatch(source, needle);
 }
 
 export async function POST(req: Request) {
@@ -149,31 +221,25 @@ export async function POST(req: Request) {
       console.log("[suggest-edit] AI 模型输出文本（", raw.length, "字符）:");
       console.log(raw);
 
-      let parsedSuggestion: unknown;
-      try {
-        parsedSuggestion = JSON.parse(raw);
-      } catch (first) {
-        try {
-          parsedSuggestion = JSON.parse(repairJsonStringInnerQuotes(raw));
-        } catch {
-          throw first;
-        }
-      }
-
-      const result = suggestSchema.parse(parsedSuggestion);
+      const result = suggestSchema.parse(parseSuggestionJson(raw));
+      const canonicalExcerpt =
+        (typeof result.excerpt === "string" && canonicalizeExcerpt(excerpt, result.excerpt)) ||
+        excerpt.trim();
       const normalizedKind = normalizeIssueKind({
-        excerpt,
+        excerpt: canonicalExcerpt,
         reason: result.reason ?? "",
         suggestion: result.suggestion,
         severity: result.kind,
       });
       console.log("[suggest-edit] 解析成功:", {
+        excerpt: canonicalExcerpt,
         suggestion: result.suggestion.trim(),
         reason: result.reason?.trim() ?? "",
         kind: normalizedKind,
       });
       console.log("[suggest-edit] ========== AI 请求结束（成功） ==========");
       return NextResponse.json({
+        excerpt: canonicalExcerpt,
         suggestion: result.suggestion.trim(),
         reason: result.reason?.trim() ?? "",
         kind: normalizedKind,
@@ -331,31 +397,25 @@ export async function POST(req: Request) {
     console.log("[suggest-edit] AI 模型输出文本（", raw.length, "字符）:");
     console.log(raw);
 
-    let parsedSuggestion: unknown;
-    try {
-      parsedSuggestion = JSON.parse(raw);
-    } catch (first) {
-      try {
-        parsedSuggestion = JSON.parse(repairJsonStringInnerQuotes(raw));
-      } catch {
-        throw first;
-      }
-    }
-
-    const result = suggestSchema.parse(parsedSuggestion);
+    const result = suggestSchema.parse(parseSuggestionJson(raw));
+    const canonicalExcerpt =
+      (typeof result.excerpt === "string" && canonicalizeExcerpt(excerpt, result.excerpt)) ||
+      excerpt.trim();
     const normalizedKind = normalizeIssueKind({
-      excerpt,
+      excerpt: canonicalExcerpt,
       reason: result.reason ?? "",
       suggestion: result.suggestion,
       severity: result.kind,
     });
     console.log("[suggest-edit] 解析成功:", {
+      excerpt: canonicalExcerpt,
       suggestion: result.suggestion.trim(),
       reason: result.reason?.trim() ?? "",
       kind: normalizedKind,
     });
     console.log("[suggest-edit] ========== AI 请求结束（成功） ==========");
     return NextResponse.json({
+      excerpt: canonicalExcerpt,
       suggestion: result.suggestion.trim(),
       reason: result.reason?.trim() ?? "",
       kind: normalizedKind,

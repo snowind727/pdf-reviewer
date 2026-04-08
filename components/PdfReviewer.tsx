@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildReviewedPdf,
@@ -43,6 +43,16 @@ import {
 
 type ScreenAnnotation = Annotation & { rects: ScreenRect[] };
 type ReviewMode = "precise" | "discover-more";
+type AnnotationListItem = Annotation & { pageNumber: number };
+type AnnotationTarget = { pageNumber: number; id: string };
+type ActiveConnectorLine = {
+  x1: number;
+  y1: number;
+  xMid: number;
+  y2: number;
+  x2: number;
+  color: string;
+};
 
 function highlightBgClass(kind: IssueKind): string {
   return kind === "error" ? "bg-red-500/35" : "bg-sky-400/30";
@@ -50,6 +60,19 @@ function highlightBgClass(kind: IssueKind): string {
 
 function connectorColor(kind: IssueKind): string {
   return kind === "error" ? "#ef4444" : "#38bdf8";
+}
+
+function annotationTargetKey(target: AnnotationTarget): string {
+  return `${target.pageNumber}:${target.id}`;
+}
+
+function elementFullyVisibleInContainer(element: HTMLElement, container: HTMLElement): boolean {
+  const elementRect = element.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  return (
+    elementRect.top >= containerRect.top + 4 &&
+    elementRect.bottom <= containerRect.bottom - 4
+  );
 }
 
 function DisclosureSummary({ label }: { label: string }) {
@@ -75,6 +98,29 @@ function normalizeRect(rect: ScreenRect): ScreenRect {
     w: Math.abs(rect.w),
     h: Math.abs(rect.h),
   };
+}
+
+function resolveAnnotationRangeWithinSelection(
+  text: string,
+  selectionRange: [number, number],
+  annotation: Pick<Annotation, "excerpt" | "suggestion" | "reason" | "kind">,
+): [number, number] | null {
+  const [selectionStart, selectionEnd] = selectionRange;
+  const selectionText = text.slice(selectionStart, selectionEnd);
+  const localRange = resolveIssueCharRange(selectionText, annotation);
+  if (localRange) {
+    return [selectionStart + localRange[0], selectionStart + localRange[1]];
+  }
+  return resolveIssueCharRange(text, annotation);
+}
+
+function scrollAnnotationCardIntoView(
+  refs: Record<string, HTMLLIElement | null>,
+  target: AnnotationTarget,
+  block: ScrollLogicalPosition = "nearest",
+) {
+  const key = annotationTargetKey(target);
+  refs[key]?.scrollIntoView({ block, behavior: "smooth" });
 }
 
 /* ------------------------------------------------------------------ */
@@ -127,6 +173,7 @@ export default function PdfReviewer() {
 
   /* --- Editing state ---------------------------------------------- */
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingPageNumber, setEditingPageNumber] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<{
     excerpt: string;
     kind: IssueKind;
@@ -173,11 +220,13 @@ export default function PdfReviewer() {
 
   /* --- Connector line refs ---------------------------------------- */
   const mainAreaRef = useRef<HTMLDivElement>(null);
+  const pdfViewportRef = useRef<HTMLDivElement>(null);
   const pdfContainerRef = useRef<HTMLDivElement>(null);
-  const annotationRefs = useRef<(HTMLLIElement | null)[]>([]);
-  const [connectorLines, setConnectorLines] = useState<
-    { x1: number; y1: number; xMid: number; y2: number; x2: number; color: string }[]
-  >([]);
+  const annotationPanelRef = useRef<HTMLDivElement>(null);
+  const annotationRefs = useRef<Record<string, HTMLLIElement | null>>({});
+  const [activeAnnotationTarget, setActiveAnnotationTarget] = useState<AnnotationTarget | null>(null);
+  const [pendingFocusTarget, setPendingFocusTarget] = useState<AnnotationTarget | null>(null);
+  const [activeConnectorLine, setActiveConnectorLine] = useState<ActiveConnectorLine | null>(null);
   const draggingRef = useRef(false);
   const interactionModeRef = useRef<
     "idle" | "marquee" | "resize-n" | "resize-e" | "resize-s" | "resize-w" | "resize-ne" | "resize-se" | "resize-sw" | "resize-nw"
@@ -263,7 +312,9 @@ export default function PdfReviewer() {
       setPageAnnotations({});
       pageFlatTextRef.current = {};
       setScreenAnnotations([]);
-      setConnectorLines([]);
+      setActiveAnnotationTarget(null);
+      setPendingFocusTarget(null);
+      setActiveConnectorLine(null);
       setLiveSelectionRange(null);
       setSelectionBox(null);
       setSelectionPopup(null);
@@ -272,6 +323,7 @@ export default function PdfReviewer() {
       setDoubaoSearchText("");
       setDoubaoCopyHint(false);
       setEditingId(null);
+      setEditingPageNumber(null);
       setPageNumber(1);
       setPageJumpInput("1");
       setPageSize({ w: 0, h: 0 });
@@ -416,71 +468,109 @@ export default function PdfReviewer() {
     setScreenAnnotations(sa);
   }, [textLayerReady, pageAnnotations, pageNumber]);
 
-  /* --- Compute connector lines ------------------------------------ */
-  useEffect(() => {
-    if (screenAnnotations.length === 0 || !mainAreaRef.current || !pdfContainerRef.current) {
-      setConnectorLines([]);
+  const annotationFeed = useMemo<AnnotationListItem[]>(() => {
+    return Object.entries(pageAnnotations)
+      .flatMap(([page, annotations]) =>
+        (annotations ?? []).map((annotation) => ({
+          ...annotation,
+          pageNumber: Number(page),
+        })),
+      )
+      .sort((a, b) => {
+        if (a.pageNumber !== b.pageNumber) return a.pageNumber - b.pageNumber;
+        const aStart = a.charRange?.[0] ?? Number.MAX_SAFE_INTEGER;
+        const bStart = b.charRange?.[0] ?? Number.MAX_SAFE_INTEGER;
+        if (aStart !== bStart) return aStart - bStart;
+        return a.id.localeCompare(b.id);
+      });
+  }, [pageAnnotations]);
+
+  const groupedAnnotationFeed = useMemo(() => {
+    const groups = new Map<number, AnnotationListItem[]>();
+    for (const item of annotationFeed) {
+      const existing = groups.get(item.pageNumber);
+      if (existing) existing.push(item);
+      else groups.set(item.pageNumber, [item]);
+    }
+    return Array.from(groups.entries()).map(([page, items]) => ({ pageNumber: page, items }));
+  }, [annotationFeed]);
+
+  const activeAnnotationKey = activeAnnotationTarget ? annotationTargetKey(activeAnnotationTarget) : null;
+  const errorAnnotationCount = annotationFeed.filter((item) => item.kind === "error").length;
+  const suspectedAnnotationCount = annotationFeed.length - errorAnnotationCount;
+  const currentPageAnnotationCount = pageAnnotations[pageNumber]?.length ?? 0;
+
+  const recomputeActiveConnector = useCallback(() => {
+    if (
+      !activeAnnotationTarget ||
+      activeAnnotationTarget.pageNumber !== pageNumber ||
+      !mainAreaRef.current ||
+      !pdfContainerRef.current
+    ) {
+      setActiveConnectorLine(null);
       return;
     }
+
+    const activeKey = annotationTargetKey(activeAnnotationTarget);
+    const card = annotationRefs.current[activeKey];
+    const annotation = screenAnnotations.find((item) => item.id === activeAnnotationTarget.id);
+    const firstRect = annotation?.rects[0];
+    if (!card || !annotation || !firstRect) {
+      setActiveConnectorLine(null);
+      return;
+    }
+
+    const panel = annotationPanelRef.current;
+    if (panel && !elementFullyVisibleInContainer(card, panel)) {
+      setActiveConnectorLine(null);
+      return;
+    }
+
     const mainRect = mainAreaRef.current.getBoundingClientRect();
     const pdfRect = pdfContainerRef.current.getBoundingClientRect();
-
-    const GAP = 6;
-    const count = screenAnnotations.filter((h, i) => h.rects.length > 0 && annotationRefs.current[i]).length;
-
-    const raw: {
-      idx: number;
-      hlX: number;
-      hlY: number;
-      cardX: number;
-      cardY: number;
-      color: string;
-    }[] = [];
-
-    for (let i = 0; i < screenAnnotations.length; i++) {
-      const h = screenAnnotations[i];
-      const card = annotationRefs.current[i];
-      if (!card || h.rects.length === 0) continue;
-
-      const cardRect = card.getBoundingClientRect();
-      const firstRect = h.rects[0];
-
-      raw.push({
-        idx: i,
-        hlX: pdfRect.left - mainRect.left + firstRect.x + firstRect.w,
-        hlY: pdfRect.top - mainRect.top + firstRect.y + firstRect.h / 2,
-        cardX: cardRect.left - mainRect.left,
-        cardY: cardRect.top - mainRect.top + cardRect.height / 2,
-        color: connectorColor(h.kind),
-      });
-    }
-
-    if (raw.length === 0) {
-      setConnectorLines([]);
+    const cardRect = card.getBoundingClientRect();
+    const x1 = pdfRect.left - mainRect.left + firstRect.x + firstRect.w;
+    const y1 = pdfRect.top - mainRect.top + firstRect.y + firstRect.h / 2;
+    const x2 = cardRect.left - mainRect.left;
+    const y2 = cardRect.top - mainRect.top + cardRect.height / 2;
+    if (x2 <= x1 + 24) {
+      setActiveConnectorLine(null);
       return;
     }
 
-    const baseX = Math.min(...raw.map((r) => r.cardX)) - GAP * (count + 1);
+    setActiveConnectorLine({
+      x1,
+      y1,
+      xMid: x2 - Math.max(18, Math.min(56, (x2 - x1) * 0.28)),
+      y2,
+      x2,
+      color: connectorColor(annotation.kind),
+    });
+  }, [activeAnnotationTarget, pageNumber, screenAnnotations]);
 
-    const sorted = [...raw].sort((a, b) => a.hlY - b.hlY);
-    const slotMap = new Map<number, number>();
-    sorted.forEach((r, si) => slotMap.set(r.idx, si));
+  useEffect(() => {
+    recomputeActiveConnector();
+  }, [recomputeActiveConnector]);
 
-    const lines: typeof connectorLines = [];
-    for (const r of raw) {
-      const slot = slotMap.get(r.idx) ?? 0;
-      const xMid = baseX + GAP * (slot + 1);
-      lines.push({
-        x1: r.hlX,
-        y1: r.hlY,
-        xMid,
-        y2: r.cardY,
-        x2: r.cardX,
-        color: r.color,
-      });
-    }
-    setConnectorLines(lines);
-  }, [screenAnnotations]);
+  useEffect(() => {
+    if (!activeAnnotationTarget) return;
+
+    const update = () => recomputeActiveConnector();
+    const panel = annotationPanelRef.current;
+    const viewport = pdfViewportRef.current;
+
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    panel?.addEventListener("scroll", update);
+    viewport?.addEventListener("scroll", update);
+
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+      panel?.removeEventListener("scroll", update);
+      viewport?.removeEventListener("scroll", update);
+    };
+  }, [activeAnnotationTarget, recomputeActiveConnector]);
 
   const buildSelectionFromRect = useCallback((rect: ScreenRect | null) => {
     const div = textLayerRef.current;
@@ -508,6 +598,15 @@ export default function PdfReviewer() {
     pageFlatTextRef.current[targetPageNumber] = flatText;
     return { flatText, formattedText };
   }, [pdfDoc]);
+
+  const focusAnnotation = useCallback((target: AnnotationTarget) => {
+    setActiveAnnotationTarget(target);
+    setPendingFocusTarget(target);
+    scrollAnnotationCardIntoView(annotationRefs.current, target);
+    if (target.pageNumber !== pageNumber) {
+      setPageNumber(target.pageNumber);
+    }
+  }, [pageNumber]);
 
   /* --- Text selection on PDF (rectangle marquee) ------------------- */
   useEffect(() => {
@@ -646,21 +745,48 @@ export default function PdfReviewer() {
     };
   }, [buildSelectionFromRect, pageNumber, textLayerReady]);
 
+  useEffect(() => {
+    if (!pendingFocusTarget || pendingFocusTarget.pageNumber !== pageNumber || !textLayerReady) return;
+
+    const active = screenAnnotations.find((annotation) => annotation.id === pendingFocusTarget.id);
+    if (!active) {
+      setPendingFocusTarget(null);
+      setActiveConnectorLine(null);
+      return;
+    }
+
+    if (active.rects.length > 0 && pdfViewportRef.current) {
+      const firstRect = active.rects[0];
+      const viewport = pdfViewportRef.current;
+      const nextTop = Math.max(0, firstRect.y - Math.max(40, viewport.clientHeight * 0.24));
+      viewport.scrollTo({ top: nextTop, behavior: "smooth" });
+    }
+
+    setPendingFocusTarget(null);
+  }, [pageNumber, pendingFocusTarget, screenAnnotations, textLayerReady]);
+
   /* --- Helpers: CRUD on pageAnnotations --------------------------- */
-  const deleteAnnotation = useCallback((id: string) => {
+  const deleteAnnotation = useCallback((targetPageNumber: number, id: string) => {
     setPageAnnotations((prev) => {
-      const anns = prev[pageNumber];
+      const anns = prev[targetPageNumber];
       if (!anns) return prev;
-      return { ...prev, [pageNumber]: anns.filter((a) => a.id !== id) };
+      return { ...prev, [targetPageNumber]: anns.filter((a) => a.id !== id) };
     });
-    if (editingId === id) {
+    if (editingId === id && editingPageNumber === targetPageNumber) {
       setEditingId(null);
+      setEditingPageNumber(null);
       setEditDraft(null);
     }
-  }, [pageNumber, editingId]);
+    if (activeAnnotationTarget?.id === id && activeAnnotationTarget.pageNumber === targetPageNumber) {
+      setActiveAnnotationTarget(null);
+      setPendingFocusTarget(null);
+      setActiveConnectorLine(null);
+    }
+  }, [activeAnnotationTarget, editingId, editingPageNumber]);
 
-  const startEditing = useCallback((a: Annotation) => {
+  const startEditing = useCallback((targetPageNumber: number, a: Annotation) => {
     setEditingId(a.id);
+    setEditingPageNumber(targetPageNumber);
     setEditDraft({
       excerpt: a.excerpt,
       kind: a.kind,
@@ -670,8 +796,8 @@ export default function PdfReviewer() {
   }, []);
 
   const saveEditing = useCallback(() => {
-    if (!editingId || !editDraft) return;
-    const flatText = pageFlatTextRef.current[pageNumber] ?? "";
+    if (!editingId || !editDraft || editingPageNumber === null) return;
+    const flatText = pageFlatTextRef.current[editingPageNumber] ?? "";
     const newRange = editDraft.excerpt
       ? resolveIssueCharRange(flatText, {
           excerpt: editDraft.excerpt,
@@ -682,11 +808,11 @@ export default function PdfReviewer() {
       : null;
 
     setPageAnnotations((prev) => {
-      const anns = prev[pageNumber];
+      const anns = prev[editingPageNumber];
       if (!anns) return prev;
       return {
         ...prev,
-        [pageNumber]: anns.map((a) =>
+        [editingPageNumber]: anns.map((a) =>
           a.id === editingId
             ? { ...a, ...editDraft, charRange: newRange }
             : a,
@@ -694,11 +820,13 @@ export default function PdfReviewer() {
       };
     });
     setEditingId(null);
+    setEditingPageNumber(null);
     setEditDraft(null);
-  }, [editingId, editDraft, pageNumber]);
+  }, [editingId, editDraft, editingPageNumber]);
 
   const cancelEditing = useCallback(() => {
     setEditingId(null);
+    setEditingPageNumber(null);
     setEditDraft(null);
   }, []);
 
@@ -715,7 +843,7 @@ export default function PdfReviewer() {
     setError(null);
     setNotice(null);
     try {
-      const { formattedText } = await loadPageText(pageNumber);
+      const { flatText, formattedText } = await loadPageText(pageNumber);
       const res = await fetch("/api/suggest-edit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -731,14 +859,35 @@ export default function PdfReviewer() {
         return;
       }
 
+      const annotationExcerpt =
+        typeof data.excerpt === "string" && data.excerpt.trim()
+          ? data.excerpt.trim()
+          : pending.excerpt;
+      const annotationKind = (data.kind as IssueKind) ?? "suspected";
+      const annotationSuggestion = typeof data.suggestion === "string" ? data.suggestion : "";
+      const annotationReason = typeof data.reason === "string" ? data.reason : "";
+      const annotationRange = resolveAnnotationRangeWithinSelection(
+        flatText,
+        pending.charRange,
+        {
+          excerpt: annotationExcerpt,
+          kind: annotationKind,
+          suggestion: annotationSuggestion,
+          reason: annotationReason,
+          id: "",
+          source: "selection-ai",
+          charRange: null,
+        },
+      );
+
       const newAnn: Annotation = {
         id: genId(),
         source: "selection-ai",
-        excerpt: pending.excerpt,
-        kind: (data.kind as IssueKind) ?? "suspected",
-        suggestion: typeof data.suggestion === "string" ? data.suggestion : "",
-        reason: typeof data.reason === "string" ? data.reason : "",
-        charRange: pending.charRange,
+        excerpt: annotationExcerpt,
+        kind: annotationKind,
+        suggestion: annotationSuggestion,
+        reason: annotationReason,
+        charRange: annotationRange,
       };
 
       setPageAnnotations((prev) => ({
@@ -1281,19 +1430,16 @@ export default function PdfReviewer() {
       {fileUrl && (
         <div ref={mainAreaRef} className="relative flex flex-1 flex-col gap-4 lg:flex-row lg:items-start">
           {/* SVG connector lines */}
-          {connectorLines.length > 0 && (
+          {activeConnectorLine && (
             <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full overflow-visible">
-              {connectorLines.map((l, i) => (
-                <polyline
-                  key={i}
-                  points={`${l.x1},${l.y1} ${l.xMid},${l.y1} ${l.xMid},${l.y2} ${l.x2},${l.y2}`}
-                  fill="none"
-                  stroke={l.color}
-                  strokeWidth={1.5}
-                  strokeDasharray="5,3"
-                  opacity={0.7}
-                />
-              ))}
+              <polyline
+                points={`${activeConnectorLine.x1},${activeConnectorLine.y1} ${activeConnectorLine.xMid},${activeConnectorLine.y1} ${activeConnectorLine.xMid},${activeConnectorLine.y2} ${activeConnectorLine.x2},${activeConnectorLine.y2}`}
+                fill="none"
+                stroke={activeConnectorLine.color}
+                strokeWidth={2}
+                strokeDasharray="6,4"
+                opacity={0.9}
+              />
             </svg>
           )}
 
@@ -1625,7 +1771,7 @@ export default function PdfReviewer() {
           </div>
 
           {/* PDF canvas + overlays */}
-          <div className="relative overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2">
+          <div ref={pdfViewportRef} className="relative overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2">
             {/* PDF Search Trigger */}
             {!isSearchOpen && pdfDoc && (
               <button
@@ -1730,13 +1876,34 @@ export default function PdfReviewer() {
                 {/* Highlight overlays */}
                 {pageSize.w > 0 &&
                   screenAnnotations.map((a) =>
-                    a.rects.map((r, ri) => (
-                      <div
-                        key={`${a.id}-${ri}`}
-                        className={`pointer-events-none absolute z-[1] rounded-sm ${highlightBgClass(a.kind)}`}
-                        style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
-                      />
-                    )),
+                    a.rects.map((r, ri) => {
+                      const isActive =
+                        activeAnnotationTarget?.pageNumber === pageNumber &&
+                        activeAnnotationTarget.id === a.id;
+                      return (
+                        <button
+                          key={`${a.id}-${ri}`}
+                          type="button"
+                          onClick={() => {
+                            focusAnnotation({ pageNumber, id: a.id });
+                            scrollAnnotationCardIntoView(
+                              annotationRefs.current,
+                              { pageNumber, id: a.id },
+                              "center",
+                            );
+                          }}
+                          className={`absolute z-[3] rounded-sm border-0 p-0 transition cursor-pointer appearance-none ${
+                            isActive
+                              ? a.kind === "error"
+                                ? "bg-red-500/50 outline outline-2 outline-red-500/80"
+                                : "bg-sky-400/50 outline outline-2 outline-sky-500/80"
+                              : `${highlightBgClass(a.kind)} hover:outline hover:outline-2 hover:outline-orange-400/80`
+                          }`}
+                          style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
+                          aria-label={`定位到第 ${pageNumber} 页批注`}
+                        />
+                      );
+                    }),
                   )}
 
                 {/* Yellow preview highlight: live drag / popup / AI generation */}
@@ -1873,183 +2040,262 @@ export default function PdfReviewer() {
           </div>
 
           {/* Sidebar */}
-          <aside className="w-full shrink-0 lg:w-[400px]">
-            <h2 className="mb-2 text-sm font-semibold text-neutral-800 dark:text-neutral-200">批注</h2>
-
-            {creatingSelectionAnnotation && (
-              <div className="mb-3 rounded-lg border border-neutral-200 bg-white p-3 text-sm shadow-sm dark:border-neutral-700 dark:bg-neutral-900">
-                <div className="flex items-center justify-between gap-2 border-b border-neutral-100 pb-2 dark:border-neutral-800">
-                  <span className="shrink-0 rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-200">
-                    生成中
-                  </span>
-                  <span className="text-xs text-neutral-500 dark:text-neutral-400">问问 AI</span>
+          <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[420px]">
+            <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">批注面板</h2>
+                  <p className="mt-1 text-xs leading-5 text-neutral-500 dark:text-neutral-400">
+                    按页码和文内顺序展示全部批注，点击卡片可定位到对应页面。
+                  </p>
                 </div>
-                <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
-                  摘录：{creatingSelectionAnnotation.excerpt || "—"}
-                </p>
-                <div className="mt-2 rounded-md bg-amber-50/90 px-2.5 py-2 text-neutral-900 dark:bg-amber-950/30 dark:text-neutral-100">
-                  <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">修改意见</span>
-                  <p className="mt-0.5 leading-relaxed">AI 正在生成批注…</p>
+                <div className="rounded-xl bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
+                  共 {annotationFeed.length} 条
                 </div>
               </div>
-            )}
 
-            {screenAnnotations.length === 0 && !creatingSelectionAnnotation ? (
-              <p className="text-sm text-neutral-500">尚未审稿。点击「AI 审稿」分析当前页，或在 PDF 上选中文字后直接添加 AI 批注。</p>
-            ) : (
-              <ul className="flex flex-col gap-3">
-                {screenAnnotations.map((a, i) => {
-                  const isEditing = editingId === a.id;
-                  return (
-                    <li
-                      key={a.id}
-                      ref={(el) => { annotationRefs.current[i] = el; }}
-                      className={`rounded-lg border bg-white p-3 text-sm shadow-sm dark:bg-neutral-900 ${
-                        a.kind === "error"
-                          ? "border-l-4 border-l-red-500 border-neutral-200 dark:border-neutral-700"
-                          : "border-l-4 border-l-sky-500 border-neutral-200 dark:border-neutral-700"
-                      }`}
-                    >
-                      {/* Card header */}
-                      <div className="flex items-start justify-between gap-2 border-b border-neutral-100 pb-2 dark:border-neutral-800">
-                        <div className="flex items-center gap-1.5">
-                          {a.source === "manual" && (
-                            <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
-                              手动
-                            </span>
-                          )}
-                          {isEditing ? (
-                            <select
-                              value={editDraft!.kind}
-                              onChange={(e) => setEditDraft((d) => d ? { ...d, kind: e.target.value as IssueKind } : d)}
-                              className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-xs dark:border-neutral-600 dark:bg-neutral-800"
-                            >
-                              <option value="error">确定错误</option>
-                              <option value="suspected">疑似错误</option>
-                            </select>
-                          ) : (
-                            <span
-                              className={`shrink-0 rounded px-2 py-0.5 text-xs font-medium ${
-                                a.kind === "error"
-                                  ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200"
-                                  : "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200"
-                              }`}
-                            >
-                              {a.kind === "error" ? "确定错误" : "疑似错误"}
-                            </span>
-                          )}
+              <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-neutral-800 dark:bg-neutral-900">
+                  <div className="text-neutral-500 dark:text-neutral-400">当前页</div>
+                  <div className="mt-1 text-sm font-semibold text-neutral-900 dark:text-neutral-100">{currentPageAnnotationCount}</div>
+                </div>
+                <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 dark:border-red-900/50 dark:bg-red-950/20">
+                  <div className="text-red-600 dark:text-red-300">确定错误</div>
+                  <div className="mt-1 text-sm font-semibold text-red-700 dark:text-red-200">{errorAnnotationCount}</div>
+                </div>
+                <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 dark:border-sky-900/50 dark:bg-sky-950/20">
+                  <div className="text-sky-700 dark:text-sky-300">疑似问题</div>
+                  <div className="mt-1 text-sm font-semibold text-sky-800 dark:text-sky-200">{suspectedAnnotationCount}</div>
+                </div>
+              </div>
+
+              {creatingSelectionAnnotation && (
+                <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-sm dark:border-amber-900/60 dark:bg-amber-950/20">
+                  <div className="flex items-center justify-between gap-2 border-b border-amber-200/70 pb-2 dark:border-amber-900/60">
+                    <span className="shrink-0 rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                      生成中
+                    </span>
+                    <span className="text-xs text-neutral-500 dark:text-neutral-400">第 {pageNumber} 页</span>
+                  </div>
+                  <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+                    摘录：{creatingSelectionAnnotation.excerpt || "—"}
+                  </p>
+                  <div className="mt-2 rounded-md bg-white/80 px-2.5 py-2 text-neutral-900 dark:bg-neutral-900/70 dark:text-neutral-100">
+                    <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">修改意见</span>
+                    <p className="mt-0.5 leading-relaxed">AI 正在生成批注…</p>
+                  </div>
+                </div>
+              )}
+
+              <div
+                ref={annotationPanelRef}
+                className="mt-4 max-h-[calc(100vh-11rem)] overflow-y-auto pr-1"
+              >
+                {annotationFeed.length === 0 && !creatingSelectionAnnotation ? (
+                  <p className="rounded-xl border border-dashed border-neutral-200 bg-neutral-50 px-4 py-6 text-sm text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400">
+                    尚未审稿。点击「AI审稿」分析页面，或在 PDF 上选中文字后直接添加 AI 批注。
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    {groupedAnnotationFeed.map((group) => (
+                      <section key={group.pageNumber} className="flex flex-col gap-3">
+                        <div className="sticky top-0 z-[1] flex items-center justify-between rounded-xl border border-neutral-200 bg-white/95 px-3 py-2 text-xs backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/95">
+                          <span className="font-medium text-neutral-700 dark:text-neutral-200">第 {group.pageNumber} 页</span>
+                          <span className="text-neutral-500 dark:text-neutral-400">{group.items.length} 条批注</span>
                         </div>
-                        <div className="flex items-center gap-1">
-                          {isEditing ? (
-                            <>
-                              <button
-                                type="button"
-                                onClick={saveEditing}
-                                className="rounded px-2 py-0.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950"
+
+                        <ul className="flex flex-col gap-3">
+                          {group.items.map((a) => {
+                            const target: AnnotationTarget = { pageNumber: group.pageNumber, id: a.id };
+                            const itemKey = annotationTargetKey(target);
+                            const isEditing = editingId === a.id && editingPageNumber === group.pageNumber;
+                            const isActive = activeAnnotationKey === itemKey;
+                            const currentPageScreenAnnotation =
+                              group.pageNumber === pageNumber
+                                ? screenAnnotations.find((item) => item.id === a.id)
+                                : null;
+                            const isUnmapped = !a.charRange || (group.pageNumber === pageNumber && currentPageScreenAnnotation?.rects.length === 0);
+
+                            return (
+                              <li
+                                key={itemKey}
+                                ref={(el) => {
+                                  annotationRefs.current[itemKey] = el;
+                                }}
+                                onClick={() => focusAnnotation(target)}
+                                className={`cursor-pointer rounded-xl border bg-white p-3 text-sm shadow-sm transition dark:bg-neutral-900 ${
+                                  isActive
+                                    ? "border-orange-300 ring-2 ring-orange-200 dark:border-orange-500/60 dark:ring-orange-500/20"
+                                    : a.kind === "error"
+                                      ? "border-l-4 border-l-red-500 border-neutral-200 dark:border-neutral-700"
+                                      : "border-l-4 border-l-sky-500 border-neutral-200 dark:border-neutral-700"
+                                }`}
                               >
-                                保存
-                              </button>
-                              <button
-                                type="button"
-                                onClick={cancelEditing}
-                                className="rounded px-2 py-0.5 text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                              >
-                                取消
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => startEditing(a)}
-                                className="rounded px-2 py-0.5 text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                              >
-                                编辑
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => deleteAnnotation(a.id)}
-                                className="rounded px-2 py-0.5 text-xs text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950 dark:hover:text-red-300"
-                              >
-                                删除
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </div>
+                                <div className="flex items-start justify-between gap-2 border-b border-neutral-100 pb-2 dark:border-neutral-800">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="rounded bg-neutral-100 px-2 py-0.5 text-[10px] font-medium text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                                      第 {group.pageNumber} 页
+                                    </span>
+                                    {a.source === "manual" && (
+                                      <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+                                        手动
+                                      </span>
+                                    )}
+                                    {a.source === "selection-ai" && (
+                                      <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900 dark:text-violet-300">
+                                        选区 AI
+                                      </span>
+                                    )}
+                                    {isEditing ? (
+                                      <select
+                                        value={editDraft!.kind}
+                                        onClick={(e) => e.stopPropagation()}
+                                        onChange={(e) => setEditDraft((d) => d ? { ...d, kind: e.target.value as IssueKind } : d)}
+                                        className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-xs dark:border-neutral-600 dark:bg-neutral-800"
+                                      >
+                                        <option value="error">确定错误</option>
+                                        <option value="suspected">疑似错误</option>
+                                      </select>
+                                    ) : (
+                                      <span
+                                        className={`shrink-0 rounded px-2 py-0.5 text-xs font-medium ${
+                                          a.kind === "error"
+                                            ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200"
+                                            : "bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200"
+                                        }`}
+                                      >
+                                        {a.kind === "error" ? "确定错误" : "疑似错误"}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    {isEditing ? (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            saveEditing();
+                                          }}
+                                          className="rounded px-2 py-0.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950"
+                                        >
+                                          保存
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            cancelEditing();
+                                          }}
+                                          className="rounded px-2 py-0.5 text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                                        >
+                                          取消
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            startEditing(group.pageNumber, a);
+                                          }}
+                                          className="rounded px-2 py-0.5 text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                                        >
+                                          编辑
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            deleteAnnotation(group.pageNumber, a.id);
+                                          }}
+                                          className="rounded px-2 py-0.5 text-xs text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950 dark:hover:text-red-300"
+                                        >
+                                          删除
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
 
-                      {a.rects.length === 0 && (
-                        <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-                          （未能定位到 PDF 文本，仅显示批注）
-                        </p>
-                      )}
+                                {isUnmapped && (
+                                  <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                                    （未能定位到 PDF 文本，仅显示批注）
+                                  </p>
+                                )}
 
-                      {/* Excerpt */}
-                      {isEditing ? (
-                        <div className="mt-2">
-                          <label className="text-xs text-neutral-500">摘录</label>
-                          <input
-                            type="text"
-                            value={editDraft!.excerpt}
-                            onChange={(e) => setEditDraft((d) => d ? { ...d, excerpt: e.target.value } : d)}
-                            className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
-                          />
-                        </div>
-                      ) : (
-                        <details className="mt-2 rounded-md border border-neutral-200/80 bg-neutral-50/70 px-2.5 py-1.5 dark:border-neutral-800 dark:bg-neutral-950/40">
-                          <DisclosureSummary label="原句" />
-                          <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
-                            {a.excerpt || "—"}
-                          </p>
-                        </details>
-                      )}
+                                {isEditing ? (
+                                  <div className="mt-2">
+                                    <label className="text-xs text-neutral-500">摘录</label>
+                                    <input
+                                      type="text"
+                                      value={editDraft!.excerpt}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => setEditDraft((d) => d ? { ...d, excerpt: e.target.value } : d)}
+                                      className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
+                                    />
+                                  </div>
+                                ) : (
+                                  <details className="mt-2 rounded-md border border-neutral-200/80 bg-neutral-50/70 px-2.5 py-1.5 dark:border-neutral-800 dark:bg-neutral-950/40">
+                                    <DisclosureSummary label="原句" />
+                                    <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+                                      {a.excerpt || "—"}
+                                    </p>
+                                  </details>
+                                )}
 
-                      {/* Suggestion */}
-                      {isEditing ? (
-                        <div className="mt-2">
-                          <label className="text-xs text-neutral-500">修改意见</label>
-                          <textarea
-                            value={editDraft!.suggestion}
-                            onChange={(e) => setEditDraft((d) => d ? { ...d, suggestion: e.target.value } : d)}
-                            rows={2}
-                            className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
-                          />
-                        </div>
-                      ) : (
-                        <div
-                          className={`mt-2 rounded-md px-2.5 py-2 text-neutral-900 dark:text-neutral-100 ${
-                            a.kind === "error" ? "bg-red-50/90 dark:bg-red-950/40" : "bg-amber-50/90 dark:bg-amber-950/30"
-                          }`}
-                        >
-                          <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">修改意见</span>
-                          <p className="mt-0.5 leading-relaxed">{a.suggestion?.trim() || "—"}</p>
-                        </div>
-                      )}
+                                {isEditing ? (
+                                  <div className="mt-2">
+                                    <label className="text-xs text-neutral-500">修改意见</label>
+                                    <textarea
+                                      value={editDraft!.suggestion}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => setEditDraft((d) => d ? { ...d, suggestion: e.target.value } : d)}
+                                      rows={2}
+                                      className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
+                                    />
+                                  </div>
+                                ) : (
+                                  <div
+                                    className={`mt-2 rounded-md px-2.5 py-2 text-neutral-900 dark:text-neutral-100 ${
+                                      a.kind === "error" ? "bg-red-50/90 dark:bg-red-950/40" : "bg-amber-50/90 dark:bg-amber-950/30"
+                                    }`}
+                                  >
+                                    <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">修改意见</span>
+                                    <p className="mt-0.5 leading-relaxed">{a.suggestion?.trim() || "—"}</p>
+                                  </div>
+                                )}
 
-                      {/* Reason */}
-                      {isEditing ? (
-                        <div className="mt-2">
-                          <label className="text-xs text-neutral-500">说明</label>
-                          <textarea
-                            value={editDraft!.reason}
-                            onChange={(e) => setEditDraft((d) => d ? { ...d, reason: e.target.value } : d)}
-                            rows={1}
-                            className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
-                          />
-                        </div>
-                      ) : a.reason?.trim() ? (
-                        <details className="mt-2 rounded-md border border-neutral-200/80 bg-neutral-50/70 px-2.5 py-1.5 dark:border-neutral-800 dark:bg-neutral-950/40">
-                          <DisclosureSummary label="说明" />
-                          <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
-                            {a.reason}
-                          </p>
-                        </details>
-                      ) : null}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+                                {isEditing ? (
+                                  <div className="mt-2">
+                                    <label className="text-xs text-neutral-500">说明</label>
+                                    <textarea
+                                      value={editDraft!.reason}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => setEditDraft((d) => d ? { ...d, reason: e.target.value } : d)}
+                                      rows={1}
+                                      className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
+                                    />
+                                  </div>
+                                ) : a.reason?.trim() ? (
+                                  <details className="mt-2 rounded-md border border-neutral-200/80 bg-neutral-50/70 px-2.5 py-1.5 dark:border-neutral-800 dark:bg-neutral-950/40">
+                                    <DisclosureSummary label="说明" />
+                                    <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+                                      {a.reason}
+                                    </p>
+                                  </details>
+                                ) : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </aside>
         </div>
       )}
