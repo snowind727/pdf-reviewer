@@ -1360,7 +1360,7 @@ export default function PdfReviewer() {
                 type="button"
                 disabled={aiBusy || !pdfDoc}
                 onClick={() => void runAiReview()}
-                className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-medium text-white transition hover:bg-orange-600 disabled:opacity-50"
+                className="min-w-[8.5rem] rounded-xl bg-orange-500 px-6 py-3 text-sm font-medium text-white transition hover:bg-orange-600 disabled:opacity-50"
               >
                 {batchReviewProgress
                   ? `审稿中… ${batchReviewProgress.done}/${batchReviewProgress.total}`
