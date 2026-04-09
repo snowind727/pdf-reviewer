@@ -22,6 +22,7 @@ const bodySchema = z.object({
   pageIndex: z.number().int().nonnegative(),
   text: z.string().max(50000),
   mode: reviewModeSchema.optional(),
+  checkPunctuation: z.boolean().optional(),
   /** 统一模型，见 lib/ai-review-models.ts */
   model: z.enum(AI_REVIEW_MODEL_ZOD_ENUM).optional(),
 });
@@ -93,8 +94,28 @@ const REVIEW_MODE_CONFIG = {
 
 type ReviewMode = keyof typeof REVIEW_MODE_CONFIG;
 
-function buildSystemPrompt(mode: ReviewMode): string {
-  return `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}`;
+function buildPunctuationInstructions(checkPunctuation: boolean): string {
+  if (checkPunctuation) {
+    return `
+---
+
+符号/标点检查：开启
+- 正常检查标点、引号、括号、顿号、书名号、分隔符等符号问题
+- 但仍要避免把 PDF 抽取换行、排版断行、文本层噪声造成的表面符号异常误判为真实错误`;
+  }
+
+  return `
+---
+
+符号/标点检查：关闭
+- 用户当前不希望重点检查符号、标点、引号、括号、分隔符等问题
+- 对纯符号、纯标点、引号样式、全半角、成对符号、顿号/逗号/分号/句号等用法问题，默认不要返回
+- 尤其不要因为 PDF 排版、断行、文本抽取噪声导致的符号异常而报问题
+- 只有当符号问题已经明显影响语义理解、事实表达或版面内容正确性时，才可少量返回，并在 reason 中明确说明影响`;
+}
+
+function buildSystemPrompt(mode: ReviewMode, checkPunctuation: boolean): string {
+  return `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}${buildPunctuationInstructions(checkPunctuation)}`;
 }
 
 function normalizeWhitespaceForMatch(value: string): string {
@@ -169,6 +190,35 @@ function sanitizeIssuesForPageText(pageText: string, review: ReturnType<typeof p
   });
 }
 
+function stripWhitespace(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+function isPunctuationOnlyText(value: string): boolean {
+  const normalized = stripWhitespace(value);
+  if (!normalized) return false;
+  return /^[\p{P}\p{S}]+$/u.test(normalized);
+}
+
+function looksLikePunctuationIssue(
+  issue: { excerpt: string; suggestion?: string; reason: string },
+): boolean {
+  const combined = `${issue.excerpt} ${issue.suggestion ?? ""} ${issue.reason}`;
+  const punctuationKeywords =
+    /标点|符号|引号|括号|书名号|顿号|逗号|句号|分号|冒号|问号|叹号|破折号|省略号|全角|半角|配对|闭合|开引号|闭引号/u;
+
+  if (isPunctuationOnlyText(issue.excerpt)) return true;
+  return punctuationKeywords.test(combined) && !/错别字|病句|语法|语义|事实|数字|年份|人名|地名|术语/u.test(combined);
+}
+
+function applyPunctuationPreference<T extends { excerpt: string; suggestion?: string; reason: string }>(
+  issues: T[],
+  checkPunctuation: boolean,
+): T[] {
+  if (checkPunctuation) return issues;
+  return issues.filter((issue) => !looksLikePunctuationIssue(issue));
+}
+
 /** Anthropic Messages API 响应（MiniMax 兼容层，非流式） */
 type AnthropicContentBlock =
   | { type: "text"; text: string }
@@ -231,13 +281,13 @@ export async function POST(req: Request) {
     );
   }
 
-  const { text, mode = "precise", model: modelParam } = parsed.data;
+  const { text, mode = "precise", checkPunctuation = true, model: modelParam } = parsed.data;
   const modelId = modelParam ?? DEFAULT_AI_REVIEW_MODEL_ID;
   const provider = getAiReviewProvider(modelId);
   const minimaxModel = provider === "minimax" ? modelId : undefined;
   const arkModel = provider === "doubao" ? modelId : undefined;
 
-  const systemPrompt = buildSystemPrompt(mode);
+  const systemPrompt = buildSystemPrompt(mode, checkPunctuation);
   const temperature = REVIEW_MODE_CONFIG[mode].temperature;
   const userContent = `--- 页面文本 ---\n${text}`;
 
@@ -288,11 +338,19 @@ export async function POST(req: Request) {
       try {
         const review = parseReviewJson(raw);
         const normalized = {
-          issues: sanitizeIssuesForPageText(text, review).map((issue) => ({
+          issues: applyPunctuationPreference(
+            sanitizeIssuesForPageText(text, review).map((issue) => ({
+              excerpt: issue.excerpt,
+              reason: issue.reason,
+              suggestion: issue.suggestion?.trim() || "",
+              kind: normalizeIssueKind(issue),
+            })),
+            checkPunctuation,
+          ).map((issue) => ({
             excerpt: issue.excerpt,
             reason: issue.reason,
-            suggestion: issue.suggestion?.trim() || "",
-            kind: normalizeIssueKind(issue),
+            suggestion: issue.suggestion,
+            kind: issue.kind,
           })),
         };
         console.log("[review-page] 解析成功，issues:", normalized.issues.length, "条");
@@ -381,6 +439,7 @@ export async function POST(req: Request) {
   console.log("[review-page] URL:", url);
   console.log("[review-page] Model:", model);
   console.log("[review-page] Review mode:", REVIEW_MODE_CONFIG[mode].label, `(${mode})`);
+  console.log("[review-page] Check punctuation:", checkPunctuation ? "on" : "off");
   console.log("[review-page] Temperature:", temperature);
   console.log("[review-page] anthropic-version:", anthropicVersion);
   console.log("[review-page] API Key (前6/后4):", apiKey.slice(0, 6) + "…" + apiKey.slice(-4));
@@ -483,11 +542,19 @@ export async function POST(req: Request) {
     try {
       const review = parseReviewJson(raw);
       const normalized = {
-        issues: sanitizeIssuesForPageText(text, review).map((issue) => ({
+        issues: applyPunctuationPreference(
+          sanitizeIssuesForPageText(text, review).map((issue) => ({
+            excerpt: issue.excerpt,
+            reason: issue.reason,
+            suggestion: issue.suggestion?.trim() || "",
+            kind: normalizeIssueKind(issue),
+          })),
+          checkPunctuation,
+        ).map((issue) => ({
           excerpt: issue.excerpt,
           reason: issue.reason,
-          suggestion: issue.suggestion?.trim() || "",
-          kind: normalizeIssueKind(issue),
+          suggestion: issue.suggestion,
+          kind: issue.kind,
         })),
       };
       console.log("[review-page] 解析成功，issues:", normalized.issues.length, "条");

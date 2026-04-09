@@ -43,6 +43,7 @@ import {
 
 type ScreenAnnotation = Annotation & { rects: ScreenRect[] };
 type ReviewMode = "precise" | "discover-more";
+type PunctuationReviewMode = "check" | "ignore";
 type AnnotationListItem = Annotation & { pageNumber: number };
 type AnnotationTarget = { pageNumber: number; id: string };
 type ActiveConnectorLine = {
@@ -157,6 +158,8 @@ export default function PdfReviewer() {
   const [screenAnnotations, setScreenAnnotations] = useState<ScreenAnnotation[]>([]);
 
   const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
+  const [punctuationReviewMode, setPunctuationReviewMode] =
+    useState<PunctuationReviewMode>("check");
   const [aiModelId, setAiModelId] = useState(DEFAULT_AI_REVIEW_MODEL_ID);
   const [batchReviewCount, setBatchReviewCount] = useState(1);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
@@ -404,10 +407,25 @@ export default function PdfReviewer() {
         const viewport = page.getViewport({ scale });
 
         const canvas = canvasRef.current!;
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
+        const outputScale =
+          typeof window !== "undefined" && window.devicePixelRatio > 0
+            ? window.devicePixelRatio
+            : 1;
+        canvas.width = Math.ceil(viewport.width * outputScale);
+        canvas.height = Math.ceil(viewport.height * outputScale);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
         const ctx = canvas.getContext("2d");
-        if (ctx) await page.render({ canvasContext: ctx, viewport }).promise;
+        if (ctx) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          await page.render({
+            canvasContext: ctx,
+            viewport,
+            transform:
+              outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
+          }).promise;
+        }
         if (revoked) return;
         setPageSize({ w: viewport.width, h: viewport.height });
 
@@ -1040,6 +1058,7 @@ export default function PdfReviewer() {
       pageIndex: targetPageNumber - 1,
       text: formattedText.slice(0, 48000),
       mode,
+      checkPunctuation: punctuationReviewMode === "check",
       model: aiModelId,
     });
 
@@ -1103,7 +1122,7 @@ export default function PdfReviewer() {
     }
 
     throw new Error("AI审稿异常，请稍后再试");
-  }, [aiModelId, loadPageText]);
+  }, [aiModelId, loadPageText, punctuationReviewMode]);
 
   const runAiReview = useCallback(async () => {
     if (!pdfDoc) return;
@@ -1368,6 +1387,20 @@ export default function PdfReviewer() {
                 >
                   <option value="precise">精确查找</option>
                   <option value="discover-more">发现更多</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
+                <span>检查符号</span>
+                <select
+                  value={punctuationReviewMode}
+                  disabled={aiBusy || !pdfDoc}
+                  onChange={(e) =>
+                    setPunctuationReviewMode(e.target.value as PunctuationReviewMode)
+                  }
+                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+                >
+                  <option value="check">是</option>
+                  <option value="ignore">否</option>
                 </select>
               </div>
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">

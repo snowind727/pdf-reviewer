@@ -42,6 +42,7 @@ export type PdfPageLike = {
   render: (params: {
     canvasContext: CanvasRenderingContext2D;
     viewport: PdfPageViewportLike;
+    transform?: [number, number, number, number, number, number];
   }) => { promise: Promise<void> };
 };
 
