@@ -29,7 +29,7 @@ export const AI_REVIEW_MODELS: readonly AiReviewModelEntry[] = [
   { id: "ep-m-20260403110728-mwwdv", label: "GLM 4.7" },
 ];
 
-export const DEFAULT_AI_REVIEW_MODEL_ID = "MiniMax-M2.5";
+export const DEFAULT_AI_REVIEW_MODEL_ID = "ep-m-20260403183338-rwpqb";
 
 const ID_SET = new Set(AI_REVIEW_MODELS.map((m) => m.id));
 
