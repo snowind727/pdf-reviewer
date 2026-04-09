@@ -67,12 +67,12 @@ function annotationTargetKey(target: AnnotationTarget): string {
   return `${target.pageNumber}:${target.id}`;
 }
 
-function elementFullyVisibleInContainer(element: HTMLElement, container: HTMLElement): boolean {
+function elementVisibleInContainer(element: HTMLElement, container: HTMLElement): boolean {
   const elementRect = element.getBoundingClientRect();
   const containerRect = container.getBoundingClientRect();
   return (
-    elementRect.top >= containerRect.top + 4 &&
-    elementRect.bottom <= containerRect.bottom - 4
+    elementRect.bottom > containerRect.top + 4 &&
+    elementRect.top < containerRect.bottom - 4
   );
 }
 
@@ -159,7 +159,7 @@ export default function PdfReviewer() {
 
   const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
   const [punctuationReviewMode, setPunctuationReviewMode] =
-    useState<PunctuationReviewMode>("check");
+    useState<PunctuationReviewMode>("ignore");
   const [aiModelId, setAiModelId] = useState(DEFAULT_AI_REVIEW_MODEL_ID);
   const [batchReviewCount, setBatchReviewCount] = useState(1);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
@@ -539,7 +539,7 @@ export default function PdfReviewer() {
     }
 
     const panel = annotationPanelRef.current;
-    if (panel && !elementFullyVisibleInContainer(card, panel)) {
+    if (panel && !elementVisibleInContainer(card, panel)) {
       setActiveConnectorLine(null);
       return;
     }
@@ -550,7 +550,11 @@ export default function PdfReviewer() {
     const x1 = pdfRect.left - mainRect.left + firstRect.x + firstRect.w;
     const y1 = pdfRect.top - mainRect.top + firstRect.y + firstRect.h / 2;
     const x2 = cardRect.left - mainRect.left;
-    const y2 = cardRect.top - mainRect.top + cardRect.height / 2;
+    const visibleTop = panel ? Math.max(cardRect.top, panel.getBoundingClientRect().top + 4) : cardRect.top;
+    const visibleBottom = panel
+      ? Math.min(cardRect.bottom, panel.getBoundingClientRect().bottom - 4)
+      : cardRect.bottom;
+    const y2 = (visibleTop + visibleBottom) / 2 - mainRect.top;
     if (x2 <= x1 + 24) {
       setActiveConnectorLine(null);
       return;
@@ -1390,7 +1394,7 @@ export default function PdfReviewer() {
                 </select>
               </div>
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>检查符号</span>
+                <span>检查排版/符号</span>
                 <select
                   value={punctuationReviewMode}
                   disabled={aiBusy || !pdfDoc}

@@ -99,19 +99,19 @@ function buildPunctuationInstructions(checkPunctuation: boolean): string {
     return `
 ---
 
-符号/标点检查：开启
-- 正常检查标点、引号、括号、顿号、书名号、分隔符等符号问题
+排版/符号检查：开启
+- 正常检查标点、引号、括号、顿号、书名号、分隔符、空格、页码、页眉页脚、目录页码等排版或符号问题
 - 但仍要避免把 PDF 抽取换行、排版断行、文本层噪声造成的表面符号异常误判为真实错误`;
   }
 
   return `
 ---
 
-符号/标点检查：关闭
-- 用户当前不希望重点检查符号、标点、引号、括号、分隔符等问题
-- 对纯符号、纯标点、引号样式、全半角、成对符号、顿号/逗号/分号/句号等用法问题，默认不要返回
-- 尤其不要因为 PDF 排版、断行、文本抽取噪声导致的符号异常而报问题
-- 只有当符号问题已经明显影响语义理解、事实表达或版面内容正确性时，才可少量返回，并在 reason 中明确说明影响`;
+排版/符号检查：关闭
+- 用户当前不希望重点检查排版格式、符号、标点、引号、括号、分隔符、空格、页码、页眉页脚、目录页码等问题
+- 对纯符号、纯标点、引号样式、全半角、成对符号、顿号/逗号/分号/句号、孤立页码、数字间空格、目录页码样式等问题，默认不要返回
+- 尤其不要因为 PDF 排版、断行、文本抽取噪声导致的符号异常、页码空格或版式问题而报问题
+- 只有当这类问题已经明显影响语义理解、事实表达或版面内容正确性时，才可少量返回，并在 reason 中明确说明影响`;
 }
 
 function buildSystemPrompt(mode: ReviewMode, checkPunctuation: boolean): string {
@@ -200,15 +200,44 @@ function isPunctuationOnlyText(value: string): boolean {
   return /^[\p{P}\p{S}]+$/u.test(normalized);
 }
 
+function isPageNumberLikeText(value: string): boolean {
+  const normalized = stripWhitespace(value);
+  if (!normalized) return false;
+  if (/^\d{1,5}$/.test(normalized)) return true;
+  if (/^[ivxlcdm]{1,8}$/i.test(normalized)) return true;
+  return false;
+}
+
 function looksLikePunctuationIssue(
   issue: { excerpt: string; suggestion?: string; reason: string },
 ): boolean {
   const combined = `${issue.excerpt} ${issue.suggestion ?? ""} ${issue.reason}`;
-  const punctuationKeywords =
-    /标点|符号|引号|括号|书名号|顿号|逗号|句号|分号|冒号|问号|叹号|破折号|省略号|全角|半角|配对|闭合|开引号|闭引号/u;
+  const formattingKeywords =
+    /标点|符号|引号|括号|书名号|顿号|逗号|句号|分号|冒号|问号|叹号|破折号|省略号|全角|半角|配对|闭合|开引号|闭引号|空格|留白|间距|排版|版式|格式|对齐|缩进|换行|断行|分页|页码|页眉|页脚|目录/u;
+  const contentKeywords =
+    /错别字|病句|语法|语义|事实|数字错误|年份|人名|地名|术语|单位|数据|引用|出处/u;
+  const suggestionNormalized = stripWhitespace(issue.suggestion ?? "");
+  const excerptNormalized = stripWhitespace(issue.excerpt);
+  const suggestedReplacement = suggestionNormalized.replace(/^建议替换为：/, "");
 
   if (isPunctuationOnlyText(issue.excerpt)) return true;
-  return punctuationKeywords.test(combined) && !/错别字|病句|语法|语义|事实|数字|年份|人名|地名|术语/u.test(combined);
+  if (isPageNumberLikeText(issue.excerpt)) return true;
+  if (
+    suggestionNormalized.startsWith("建议替换为：") &&
+    excerptNormalized &&
+    excerptNormalized !== suggestedReplacement &&
+    isPageNumberLikeText(suggestedReplacement)
+  ) {
+    return true;
+  }
+  if (
+    excerptNormalized &&
+    suggestionNormalized &&
+    suggestionNormalized === `建议替换为：${excerptNormalized}`
+  ) {
+    return true;
+  }
+  return formattingKeywords.test(combined) && !contentKeywords.test(combined);
 }
 
 function applyPunctuationPreference<T extends { excerpt: string; suggestion?: string; reason: string }>(
@@ -281,7 +310,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const { text, mode = "precise", checkPunctuation = true, model: modelParam } = parsed.data;
+  const { text, mode = "precise", checkPunctuation = false, model: modelParam } = parsed.data;
   const modelId = modelParam ?? DEFAULT_AI_REVIEW_MODEL_ID;
   const provider = getAiReviewProvider(modelId);
   const minimaxModel = provider === "minimax" ? modelId : undefined;
