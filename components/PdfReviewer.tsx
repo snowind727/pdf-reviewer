@@ -32,8 +32,7 @@ const DOUBAO_SPEC_SESSION_KEY = "pdf-reviewer:doubao-editor-spec-override";
 import {
   annotateTextLayerCharRanges,
   computeDomHighlightRects,
-  screenRectToCharRange,
-  snapScreenRectToTextRows,
+  selectionToCharRange,
   type ScreenRect,
 } from "@/lib/highlight-dom";
 
@@ -90,15 +89,6 @@ function DisclosureSummary({ label }: { label: string }) {
 let _nextId = 0;
 function genId(): string {
   return `ann_${Date.now()}_${++_nextId}`;
-}
-
-function normalizeRect(rect: ScreenRect): ScreenRect {
-  return {
-    x: rect.w >= 0 ? rect.x : rect.x + rect.w,
-    y: rect.h >= 0 ? rect.y : rect.y + rect.h,
-    w: Math.abs(rect.w),
-    h: Math.abs(rect.h),
-  };
 }
 
 function resolveAnnotationRangeWithinSelection(
@@ -186,9 +176,6 @@ export default function PdfReviewer() {
 
   /* --- Text selection --------------------------------------------- */
   const [liveSelectionRange, setLiveSelectionRange] = useState<[number, number] | null>(null);
-  const [selectionBox, setSelectionBox] = useState<ScreenRect | null>(null);
-  const selectionBoxRef = useRef<ScreenRect | null>(null);
-  selectionBoxRef.current = selectionBox;
   const [selectionPopup, setSelectionPopup] = useState<{
     x: number;
     y: number;
@@ -230,14 +217,6 @@ export default function PdfReviewer() {
   const [activeAnnotationTarget, setActiveAnnotationTarget] = useState<AnnotationTarget | null>(null);
   const [pendingFocusTarget, setPendingFocusTarget] = useState<AnnotationTarget | null>(null);
   const [activeConnectorLine, setActiveConnectorLine] = useState<ActiveConnectorLine | null>(null);
-  const draggingRef = useRef(false);
-  const interactionModeRef = useRef<
-    "idle" | "marquee" | "resize-n" | "resize-e" | "resize-s" | "resize-w" | "resize-ne" | "resize-se" | "resize-sw" | "resize-nw"
-  >("idle");
-  const selectionOriginRef = useRef<{ x: number; y: number } | null>(null);
-  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
-  const selectionStartRectRef = useRef<ScreenRect | null>(null);
-
   /* --- Custom drag interaction ----------------------------------- */
   useEffect(() => {
     if (!isDraggingSelection) return;
@@ -319,7 +298,6 @@ export default function PdfReviewer() {
       setPendingFocusTarget(null);
       setActiveConnectorLine(null);
       setLiveSelectionRange(null);
-      setSelectionBox(null);
       setSelectionPopup(null);
       setCreatingSelectionAnnotation(null);
       setSpeechSearchText("");
@@ -393,7 +371,6 @@ export default function PdfReviewer() {
     if (!pdfDoc || !canvasRef.current) return;
     setTextLayerReady(false);
     setLiveSelectionRange(null);
-    setSelectionBox(null);
     setSelectionPopup(null);
 
     let revoked = false;
@@ -594,19 +571,6 @@ export default function PdfReviewer() {
     };
   }, [activeAnnotationTarget, recomputeActiveConnector]);
 
-  const buildSelectionFromRect = useCallback((rect: ScreenRect | null) => {
-    const div = textLayerRef.current;
-    if (!div || !rect) return null;
-    const snapped = snapScreenRectToTextRows(div, rect);
-    const range = screenRectToCharRange(div, snapped);
-    if (!range) return null;
-    return {
-      rect: normalizeRect(snapped),
-      range,
-      text: (pageFlatTextRef.current[pageNumber] ?? "").slice(range[0], range[1]),
-    };
-  }, [pageNumber]);
-
   const loadPageText = useCallback(async (targetPageNumber: number) => {
     const doc = pdfDoc;
     if (!doc) throw new Error("PDF 尚未加载完成");
@@ -630,142 +594,57 @@ export default function PdfReviewer() {
     }
   }, [pageNumber]);
 
-  /* --- Text selection on PDF (rectangle marquee) ------------------- */
+  /* --- Text selection on PDF (native selection) -------------------- */
   useEffect(() => {
     const div = textLayerRef.current;
     const container = pdfContainerRef.current;
     if (!div || !container || !textLayerReady) return;
 
-    const rectFromPoints = (clientX: number, clientY: number): ScreenRect | null => {
-      const origin = selectionOriginRef.current;
-      if (!origin) return null;
-      const containerRect = container.getBoundingClientRect();
-      return {
-        x: origin.x,
-        y: origin.y,
-        w: clientX - containerRect.left - origin.x,
-        h: clientY - containerRect.top - origin.y,
-      };
-    };
-
-    const resizeRectFromPointer = (clientX: number, clientY: number): ScreenRect | null => {
-      const base = selectionStartRectRef.current;
-      const start = pointerStartRef.current;
-      if (!base || !start) return null;
-      const containerRect = container.getBoundingClientRect();
-      const x = clientX - containerRect.left;
-      const y = clientY - containerRect.top;
-      const dx = x - start.x;
-      const dy = y - start.y;
-      const mode = interactionModeRef.current;
-      const next = { ...base };
-      if (mode.includes("w")) {
-        next.x = base.x + dx;
-        next.w = base.w - dx;
-      }
-      if (mode.includes("e")) {
-        next.w = base.w + dx;
-      }
-      if (mode.includes("n")) {
-        next.y = base.y + dy;
-        next.h = base.h - dy;
-      }
-      if (mode.includes("s")) {
-        next.h = base.h + dy;
-      }
-      return normalizeRect(next);
+    const onSelectionChange = () => {
+      const sel = document.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      const charRange = selectionToCharRange(div, sel);
+      if (charRange) setLiveSelectionRange(charRange);
     };
 
     const onMouseDown = (e: MouseEvent) => {
       const target = e.target;
-      if (target instanceof Element && target.closest("[data-selection-popup='true']")) {
-        return;
-      }
-      if (target instanceof Element) {
-        const handle = target.closest("[data-selection-handle]");
-        if (handle instanceof HTMLElement && selectionBoxRef.current) {
-          e.preventDefault();
-          draggingRef.current = true;
-          interactionModeRef.current = handle.dataset.selectionHandle as typeof interactionModeRef.current;
-          const containerRect = container.getBoundingClientRect();
-          pointerStartRef.current = {
-            x: e.clientX - containerRect.left,
-            y: e.clientY - containerRect.top,
-          };
-          selectionStartRectRef.current = normalizeRect(selectionBoxRef.current);
-          return;
-        }
-      }
-      e.preventDefault();
-      const containerRect = container.getBoundingClientRect();
-      draggingRef.current = true;
-      interactionModeRef.current = "marquee";
-      selectionOriginRef.current = {
-        x: e.clientX - containerRect.left,
-        y: e.clientY - containerRect.top,
-      };
-      pointerStartRef.current = null;
-      selectionStartRectRef.current = null;
+      if (target instanceof Element && target.closest("[data-selection-popup='true']")) return;
       setSelectionPopup(null);
       setLiveSelectionRange(null);
-      setSelectionBox(null);
     };
 
-    const onMouseMove = (e: MouseEvent) => {
-      if (!draggingRef.current) return;
-      e.preventDefault();
-      const rect =
-        interactionModeRef.current === "marquee"
-          ? rectFromPoints(e.clientX, e.clientY)
-          : resizeRectFromPointer(e.clientX, e.clientY);
-      if (!rect) return;
-      const data = buildSelectionFromRect(rect);
-      setSelectionBox(data?.rect ?? normalizeRect(rect));
-      setLiveSelectionRange(data?.range ?? null);
-    };
-
-    const onMouseUp = (e: MouseEvent) => {
-      if (!draggingRef.current) return;
-      draggingRef.current = false;
-      const rect =
-        interactionModeRef.current === "marquee"
-          ? rectFromPoints(e.clientX, e.clientY)
-          : resizeRectFromPointer(e.clientX, e.clientY);
-      const data = buildSelectionFromRect(rect);
-      interactionModeRef.current = "idle";
-      selectionOriginRef.current = null;
-      pointerStartRef.current = null;
-      selectionStartRectRef.current = null;
-
-      if (!data) {
-        setLiveSelectionRange(null);
-        setSelectionBox(null);
-        setSelectionPopup(null);
-        return;
-      }
-
-      const normX = data.rect.x;
-      const normY = data.rect.y;
-      const normW = data.rect.w;
-      setSelectionBox(data.rect);
-      setLiveSelectionRange(data.range);
-      setSelectionPopup({
-        x: normX + normW,
-        y: normY - 8,
-        charRange: data.range,
-        text: data.text,
+    const onMouseUp = () => {
+      requestAnimationFrame(() => {
+        const sel = document.getSelection();
+        if (!sel || sel.isCollapsed) return;
+        const charRange = selectionToCharRange(div, sel);
+        if (!charRange) return;
+        const text = (pageFlatTextRef.current[pageNumber] ?? "").slice(charRange[0], charRange[1]);
+        if (!text) return;
+        setLiveSelectionRange(charRange);
+        const rects = computeDomHighlightRects(div, charRange[0], charRange[1]);
+        if (rects.length > 0) {
+          const lastRect = rects[rects.length - 1];
+          setSelectionPopup({
+            x: lastRect.x + lastRect.w,
+            y: lastRect.y - 8,
+            charRange,
+            text,
+          });
+        }
       });
     };
 
     container.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+    container.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("selectionchange", onSelectionChange);
     return () => {
       container.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
+      container.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("selectionchange", onSelectionChange);
     };
-  }, [buildSelectionFromRect, pageNumber, textLayerReady]);
+  }, [pageNumber, textLayerReady]);
 
   useEffect(() => {
     if (!pendingFocusTarget || pendingFocusTarget.pageNumber !== pageNumber || !textLayerReady) return;
@@ -861,7 +740,7 @@ export default function PdfReviewer() {
     setCreatingSelectionAnnotation(pending);
     setSelectionPopup(null);
     setLiveSelectionRange(null);
-    setSelectionBox(null);
+    document.getSelection()?.removeAllRanges();
     setError(null);
     setNotice(null);
     try {
@@ -1973,7 +1852,7 @@ export default function PdfReviewer() {
                     }),
                   )}
 
-                {/* Yellow preview highlight: live drag / popup / AI generation */}
+                {/* Yellow preview highlight: live selection / popup / AI generation */}
                 {(() => {
                   if (!pageSize.w) return null;
                   const pendingRects = creatingSelectionAnnotation?.charRange && textLayerRef.current
@@ -1989,13 +1868,39 @@ export default function PdfReviewer() {
                           liveSelectionRange[1],
                         )
                       : [];
-                  return pendingRects.map((r, ri) => (
-                    <div
-                      key={`pending-${ri}`}
-                      className="pointer-events-none absolute z-[1] rounded-sm bg-yellow-400/40"
-                      style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
-                    />
-                  ));
+                  if (pendingRects.length === 0) return null;
+                  const showGrab = selectionPopup && !creatingSelectionAnnotation;
+                  let grabBox: ScreenRect | null = null;
+                  if (showGrab) {
+                    const minX = Math.min(...pendingRects.map((r) => r.x));
+                    const minY = Math.min(...pendingRects.map((r) => r.y));
+                    const maxX = Math.max(...pendingRects.map((r) => r.x + r.w));
+                    const maxY = Math.max(...pendingRects.map((r) => r.y + r.h));
+                    grabBox = { x: minX + 4, y: minY + 4, w: Math.max(0, maxX - minX - 8), h: Math.max(0, maxY - minY - 8) };
+                  }
+                  return (
+                    <>
+                      {pendingRects.map((r, ri) => (
+                        <div
+                          key={`pending-${ri}`}
+                          className="pointer-events-none absolute z-[1] rounded-sm bg-yellow-400/40"
+                          style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
+                        />
+                      ))}
+                      {grabBox && (
+                        <div
+                          data-selection-popup="true"
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            setIsDraggingSelection(true);
+                          }}
+                          className="absolute z-[3] cursor-grab active:cursor-grabbing"
+                          style={{ left: grabBox.x, top: grabBox.y, width: grabBox.w, height: grabBox.h }}
+                        />
+                      )}
+                    </>
+                  );
                 })()}
 
                 {/* Highlight current search result */}
@@ -2013,60 +1918,6 @@ export default function PdfReviewer() {
                     />
                   ));
                 })()}
-
-                {/* Rectangle marquee while dragging */}
-                {selectionBox && (
-                  <>
-                    <div
-                      className="pointer-events-none absolute z-[3] border-2 border-yellow-500/80 bg-yellow-300/10"
-                      style={{
-                        left: selectionBox.x,
-                        top: selectionBox.y,
-                        width: selectionBox.w,
-                        height: selectionBox.h,
-                      }}
-                    />
-                    {/* Custom mouse-based grab area inside selection box */}
-                    {selectionPopup && (
-                      <div
-                        data-selection-popup="true"
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          setIsDraggingSelection(true);
-                        }}
-                        className="absolute z-[3] cursor-grab active:cursor-grabbing"
-                        style={{
-                          left: selectionBox.x + 6,
-                          top: selectionBox.y + 6,
-                          width: Math.max(0, selectionBox.w - 12),
-                          height: Math.max(0, selectionBox.h - 12),
-                        }}
-                      />
-                    )}
-                    {[
-                      { key: "resize-nw", left: selectionBox.x - 5, top: selectionBox.y - 5, cursor: "nwse-resize" },
-                      { key: "resize-n", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y - 5, cursor: "ns-resize" },
-                      { key: "resize-ne", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y - 5, cursor: "nesw-resize" },
-                      { key: "resize-e", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y + selectionBox.h / 2 - 5, cursor: "ew-resize" },
-                      { key: "resize-se", left: selectionBox.x + selectionBox.w - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "nwse-resize" },
-                      { key: "resize-s", left: selectionBox.x + selectionBox.w / 2 - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "ns-resize" },
-                      { key: "resize-sw", left: selectionBox.x - 5, top: selectionBox.y + selectionBox.h - 5, cursor: "nesw-resize" },
-                      { key: "resize-w", left: selectionBox.x - 5, top: selectionBox.y + selectionBox.h / 2 - 5, cursor: "ew-resize" },
-                    ].map((handle) => (
-                      <div
-                        key={handle.key}
-                        data-selection-handle={handle.key}
-                        className="absolute z-[4] h-2.5 w-2.5 rounded-full border border-yellow-700 bg-white"
-                        style={{
-                          left: handle.left,
-                          top: handle.top,
-                          cursor: handle.cursor,
-                        }}
-                      />
-                    ))}
-                  </>
-                )}
 
                 {/* Selection popup: "添加批注" button */}
                 {selectionPopup && (

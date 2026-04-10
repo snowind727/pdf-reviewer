@@ -34,8 +34,8 @@ body {
   line-height: 1;
   text-size-adjust: none;
   pointer-events: auto;
-  user-select: none;
-  cursor: crosshair;
+  user-select: text;
+  cursor: text;
   z-index: 2;
 }
 
