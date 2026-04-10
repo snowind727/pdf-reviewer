@@ -1329,7 +1329,7 @@ export default function PdfReviewer() {
 
   /* --- Render ----------------------------------------------------- */
   return (
-    <div className="mx-auto flex max-w-[1480px] flex-col gap-5 px-4 pb-8 pt-2">
+    <div className="mx-auto flex min-h-0 w-full max-w-[1480px] flex-1 flex-col gap-5 px-4 pb-8 pt-2">
       {/* Header */}
       <header className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
         <div className="flex flex-col gap-1">
@@ -1462,7 +1462,7 @@ export default function PdfReviewer() {
 
       {/* Main */}
       {fileUrl && (
-        <div ref={mainAreaRef} className="relative flex flex-1 flex-col gap-4 lg:flex-row lg:items-start">
+        <div ref={mainAreaRef} className="relative flex min-h-0 flex-1 flex-col gap-4 lg:flex-row lg:items-start">
           {/* SVG connector lines */}
           {activeConnectorLine && (
             <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full overflow-visible">
@@ -1571,7 +1571,7 @@ export default function PdfReviewer() {
             </div>
           )}
 
-          <div className="grid min-w-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+          <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
           <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-1 lg:row-start-1 lg:flex lg:h-full lg:min-h-[66px] lg:items-center">
             <div className="flex w-full items-center justify-between gap-3">
               <div>
@@ -1740,9 +1740,9 @@ export default function PdfReviewer() {
             </div>
           </aside>
 
-          <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-1">
-            <div className="flex min-h-[66px] flex-wrap items-center gap-3 text-sm">
-              <div className="flex items-center gap-2">
+          <div className="flex min-h-0 items-center justify-center rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-1">
+            <div className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-3 overflow-x-auto text-sm [scrollbar-width:thin]">
+              <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
                   disabled={pageNumber <= 1 || !pdfDoc}
@@ -1760,10 +1760,10 @@ export default function PdfReviewer() {
                   下一页
                 </button>
               </div>
-              <div className="rounded-xl bg-neutral-100 px-3 py-2 leading-none text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
+              <div className="shrink-0 rounded-xl bg-neutral-100 px-3 py-2 leading-none text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
                 第 {pageNumber} / {numPages || "—"} 页
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <span className="text-neutral-500 dark:text-neutral-400">跳转到</span>
                 <input
                   type="number"
@@ -1789,8 +1789,8 @@ export default function PdfReviewer() {
                   跳转
                 </button>
               </div>
-              <div className="ml-auto flex items-center gap-2">
-                <span className="text-neutral-500 dark:text-neutral-400">缩放</span>
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="whitespace-nowrap text-neutral-500 dark:text-neutral-400">缩放</span>
                 <input
                   type="range"
                   min={0.6}
@@ -1798,14 +1798,44 @@ export default function PdfReviewer() {
                   step={0.1}
                   value={scale}
                   onChange={(e) => setScale(Number(e.target.value))}
+                  className="m-0 h-2 w-24 cursor-pointer align-middle sm:w-28"
                 />
-                <span className="min-w-12 tabular-nums text-neutral-700 dark:text-neutral-200">{scale.toFixed(1)}×</span>
+                <span className="min-w-12 shrink-0 tabular-nums text-neutral-700 dark:text-neutral-200">{scale.toFixed(1)}×</span>
               </div>
             </div>
           </div>
 
           {/* PDF canvas + overlays */}
-          <div ref={pdfViewportRef} className="relative overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2">
+          <div
+            ref={pdfViewportRef}
+            className="relative h-full min-h-0 overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2"
+          >
+            {!docLoading && !docError && pdfDoc && (
+              <>
+                <button
+                  type="button"
+                  disabled={pageNumber <= 1}
+                  aria-label="上一页"
+                  onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+                  className="absolute left-px top-1/2 z-20 hidden -translate-y-1/2 items-center justify-center rounded-xl border border-neutral-200 bg-white/95 px-1.5 py-3 text-neutral-700 shadow-sm backdrop-blur-sm transition hover:bg-neutral-50 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 dark:border-neutral-800 dark:bg-neutral-900/95 dark:text-neutral-200 dark:hover:bg-neutral-800 sm:inline-flex"
+                >
+                  <span className="text-[11px] font-medium leading-tight tracking-normal [writing-mode:vertical-rl]">
+                    上一页
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  disabled={pageNumber >= numPages}
+                  aria-label="下一页"
+                  onClick={() => setPageNumber((p) => Math.min(numPages || p, p + 1))}
+                  className="absolute right-px top-1/2 z-20 hidden -translate-y-1/2 items-center justify-center rounded-xl border border-neutral-200 bg-white/95 px-1.5 py-3 text-neutral-700 shadow-sm backdrop-blur-sm transition hover:bg-neutral-50 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 dark:border-neutral-800 dark:bg-neutral-900/95 dark:text-neutral-200 dark:hover:bg-neutral-800 sm:inline-flex"
+                >
+                  <span className="text-[11px] font-medium leading-tight tracking-normal [writing-mode:vertical-rl]">
+                    下一页
+                  </span>
+                </button>
+              </>
+            )}
             {/* PDF Search Trigger */}
             {!isSearchOpen && pdfDoc && (
               <button
@@ -1896,15 +1926,18 @@ export default function PdfReviewer() {
                 </div>
               </div>
             )}
+            <div className="flex min-h-full w-full flex-col items-center justify-center">
             {docLoading && <p className="text-sm text-neutral-500">正在打开 PDF…</p>}
             {docError && <p className="text-sm text-red-600">{docError}</p>}
             {!docLoading && !docError && pdfDoc && (
-              <div
-                ref={pdfContainerRef}
-                className="relative mx-auto inline-block shadow-md"
-                style={pageSize.w ? { width: pageSize.w, height: pageSize.h } : undefined}
-              >
-                <canvas ref={canvasRef} className="block max-w-full" />
+              <div className="relative flex w-full max-w-full justify-center">
+                <div className="flex min-w-0 justify-center">
+                <div
+                  ref={pdfContainerRef}
+                  className="relative shrink-0 shadow-md"
+                  style={pageSize.w ? { width: pageSize.w, height: pageSize.h } : undefined}
+                >
+                <canvas ref={canvasRef} className="block" />
                 <div ref={textLayerRef} className="pdf-text-layer" />
 
                 {/* Highlight overlays */}
@@ -2069,7 +2102,10 @@ export default function PdfReviewer() {
                   </div>
                 )}
               </div>
+                </div>
+              </div>
             )}
+            </div>
           </div>
           </div>
 
