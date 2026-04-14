@@ -408,6 +408,7 @@ export default function PdfReviewer() {
 
         if (textLayerDiv && pdfjsLib?.TextLayer) {
           textLayerDiv.innerHTML = "";
+          textLayerDiv.style.setProperty("--total-scale-factor", `${scale}`);
           const tc = await page.getTextContent();
           if (revoked) return;
           tlInstance = new pdfjsLib.TextLayer({
@@ -417,6 +418,11 @@ export default function PdfReviewer() {
           });
           await tlInstance.render();
           annotateTextLayerCharRanges(textLayerDiv);
+
+          const endOfContent = document.createElement("div");
+          endOfContent.className = "endOfContent";
+          textLayerDiv.append(endOfContent);
+
           if (!revoked) setTextLayerReady(true);
         }
       } catch {
@@ -594,27 +600,57 @@ export default function PdfReviewer() {
     }
   }, [pageNumber]);
 
-  /* --- Text selection on PDF (native selection) -------------------- */
+  /* --- Text selection on PDF (native selection + endOfContent fix) -- */
   useEffect(() => {
     const div = textLayerRef.current;
     const container = pdfContainerRef.current;
     if (!div || !container || !textLayerReady) return;
 
-    const onSelectionChange = () => {
-      const sel = document.getSelection();
-      if (!sel || sel.isCollapsed) return;
-      const charRange = selectionToCharRange(div, sel);
-      if (charRange) setLiveSelectionRange(charRange);
+    const endDiv = div.querySelector<HTMLDivElement>(".endOfContent");
+    const ac = new AbortController();
+    const { signal } = ac;
+
+    let isPointerDown = false;
+    let prevRange: Range | null = null;
+
+    const resetEndOfContent = () => {
+      if (endDiv) {
+        div.append(endDiv);
+        endDiv.style.width = "";
+        endDiv.style.height = "";
+      }
+      div.classList.remove("selecting");
     };
 
-    const onMouseDown = (e: MouseEvent) => {
+    /* --- mousedown on container: clear popup & start selecting --- */
+    container.addEventListener("mousedown", (e: MouseEvent) => {
       const target = e.target;
       if (target instanceof Element && target.closest("[data-selection-popup='true']")) return;
       setSelectionPopup(null);
       setLiveSelectionRange(null);
-    };
+    }, { signal });
 
-    const onMouseUp = () => {
+    /* --- mousedown on text layer: mark as selecting --- */
+    div.addEventListener("mousedown", () => {
+      div.classList.add("selecting");
+    }, { signal });
+
+    /* --- pointerdown / pointerup / blur: track pointer state --- */
+    document.addEventListener("pointerdown", () => { isPointerDown = true; }, { signal });
+    document.addEventListener("pointerup", () => {
+      isPointerDown = false;
+      resetEndOfContent();
+    }, { signal });
+    window.addEventListener("blur", () => {
+      isPointerDown = false;
+      resetEndOfContent();
+    }, { signal });
+    document.addEventListener("keyup", () => {
+      if (!isPointerDown) resetEndOfContent();
+    }, { signal });
+
+    /* --- mouseup on container: finalize selection popup --- */
+    container.addEventListener("mouseup", () => {
       requestAnimationFrame(() => {
         const sel = document.getSelection();
         if (!sel || sel.isCollapsed) return;
@@ -634,15 +670,71 @@ export default function PdfReviewer() {
           });
         }
       });
-    };
+    }, { signal });
 
-    container.addEventListener("mousedown", onMouseDown);
-    container.addEventListener("mouseup", onMouseUp);
-    document.addEventListener("selectionchange", onSelectionChange);
+    /* --- selectionchange: live highlight + Chrome endOfContent repositioning --- */
+    const isFirefox = typeof CSS !== "undefined" && CSS.supports?.("-moz-appearance", "none");
+
+    document.addEventListener("selectionchange", () => {
+      const sel = document.getSelection();
+      if (!sel || sel.rangeCount === 0) {
+        resetEndOfContent();
+        return;
+      }
+
+      const range = sel.getRangeAt(0);
+      const selInTextLayer = range.intersectsNode(div);
+
+      if (selInTextLayer) {
+        div.classList.add("selecting");
+      } else {
+        resetEndOfContent();
+      }
+
+      if (!sel.isCollapsed) {
+        const charRange = selectionToCharRange(div, sel);
+        if (charRange) setLiveSelectionRange(charRange);
+      }
+
+      if (isFirefox || !endDiv || !selInTextLayer) return;
+
+      const modifyStart = prevRange && (
+        range.compareBoundaryPoints(Range.END_TO_END, prevRange) === 0 ||
+        range.compareBoundaryPoints(Range.START_TO_END, prevRange) === 0
+      );
+      let anchor: Node = modifyStart ? range.startContainer : range.endContainer;
+      if (anchor.nodeType === Node.TEXT_NODE) {
+        anchor = anchor.parentNode!;
+      }
+
+      if (!modifyStart && range.endOffset === 0) {
+        try {
+          do {
+            while (!anchor.previousSibling) anchor = anchor.parentNode!;
+            anchor = anchor.previousSibling;
+          } while (!anchor.childNodes.length);
+        } catch {
+          prevRange = range.cloneRange();
+          return;
+        }
+      }
+
+      const parentTextLayer = (anchor as Element).parentElement?.closest(".pdf-text-layer");
+      if (parentTextLayer === div) {
+        endDiv.style.width = div.style.width || "";
+        endDiv.style.height = div.style.height || "";
+        (anchor as Element).parentElement!.insertBefore(
+          endDiv,
+          modifyStart ? anchor : anchor.nextSibling,
+        );
+      }
+
+      prevRange = range.cloneRange();
+    }, { signal });
+
     return () => {
-      container.removeEventListener("mousedown", onMouseDown);
-      container.removeEventListener("mouseup", onMouseUp);
-      document.removeEventListener("selectionchange", onSelectionChange);
+      ac.abort();
+      resetEndOfContent();
     };
   }, [pageNumber, textLayerReady]);
 
