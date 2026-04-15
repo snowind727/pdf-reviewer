@@ -1287,6 +1287,7 @@ export default function PdfReviewer() {
   const hasAnyAnnotations = Object.values(pageAnnotations).some((a) => a && a.length > 0);
   const maxBatchPages = Math.min(10, Math.max(0, numPages - pageNumber + 1));
   const aiBusy = !!batchReviewProgress || !!creatingSelectionAnnotation;
+  const scaleSliderPercent = `${Math.max(0, Math.min(100, ((scale - 0.6) / 1.4) * 100))}%`;
   const jumpToPage = useCallback(() => {
     const parsed = Number(pageJumpInput.trim());
     if (!Number.isFinite(parsed)) {
@@ -1469,8 +1470,8 @@ export default function PdfReviewer() {
                     "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 1 页。",
                     "如需批量处理，可把审稿页数调大，从当前页起连续审核最多 10 页。",
                     "选中文本后可“复制文本”或直接“添加批注”。",
-                    "「豆包搜索」：Enter 或下方按钮会复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
+                    "「豆包搜索」：Enter 或下方按钮会复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。",
                     "若某条 AI 批注无法在 PDF 文本层定位，仍会出现在右侧批注列表中，页面上不会高亮。",
                   ].map((item, index) => (
                     <div
@@ -1542,7 +1543,7 @@ export default function PdfReviewer() {
             </div>
           )}
 
-          <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+          <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)]">
           <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-1 lg:row-start-1 lg:flex lg:h-full lg:min-h-[66px] lg:items-center">
             <div className="flex w-full items-center justify-between gap-3">
               <div>
@@ -1597,6 +1598,43 @@ export default function PdfReviewer() {
                     }`}
                   />
                   <p className="mt-3 text-xs text-amber-900/75 dark:text-amber-100/60">按 Enter 搜索，按 Shift + Enter 换行。</p>
+                </div>
+              </section>
+
+              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-sky-200 bg-[radial-gradient(circle_at_top_left,_rgba(186,230,253,0.5),_transparent_36%),linear-gradient(180deg,rgba(240,249,255,0.98),rgba(248,250,252,0.98))] p-5 shadow-sm dark:border-sky-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_36%),linear-gradient(180deg,rgba(2,6,23,0.98),rgba(3,7,18,0.98))]">
+                <div className="pointer-events-none absolute -left-8 top-12 h-24 w-24 rounded-full bg-sky-200/40 blur-3xl dark:bg-sky-500/10" />
+                <div className="relative flex h-full flex-col">
+                  <h2 className="text-xl font-semibold tracking-tight text-sky-950 dark:text-sky-50">重要讲话数据库</h2>
+                  <textarea
+                    id="speech-search-input"
+                    value={speechSearchText}
+                    onChange={(e) => setSpeechSearchText(e.target.value)}
+                    placeholder="输入要检索的讲话内容"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        openSpeechDatabaseSearch();
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                      setDragOverTarget('speech');
+                    }}
+                    onDragLeave={() => setDragOverTarget((v) => v === 'speech' ? null : v)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const text = e.dataTransfer.getData('text/plain');
+                      if (text) setSpeechSearchText(text);
+                      setDragOverTarget(null);
+                    }}
+                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                      dragOverTarget === 'speech'
+                        ? 'border-sky-500 ring-2 ring-sky-300 dark:border-sky-400 dark:ring-sky-500/40'
+                        : 'border-sky-200 dark:border-sky-800'
+                    }`}
+                  />
+                  <p className="mt-3 text-xs text-sky-800/80 dark:text-sky-200/70">按 Enter 搜索，按 Shift + Enter 换行。</p>
                 </div>
               </section>
 
@@ -1671,49 +1709,12 @@ export default function PdfReviewer() {
                   </button>
                 </div>
               </section>
-
-              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-sky-200 bg-[radial-gradient(circle_at_top_left,_rgba(186,230,253,0.5),_transparent_36%),linear-gradient(180deg,rgba(240,249,255,0.98),rgba(248,250,252,0.98))] p-5 shadow-sm dark:border-sky-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_36%),linear-gradient(180deg,rgba(2,6,23,0.98),rgba(3,7,18,0.98))]">
-                <div className="pointer-events-none absolute -left-8 top-12 h-24 w-24 rounded-full bg-sky-200/40 blur-3xl dark:bg-sky-500/10" />
-                <div className="relative flex h-full flex-col">
-                  <h2 className="text-xl font-semibold tracking-tight text-sky-950 dark:text-sky-50">重要讲话数据库</h2>
-                  <textarea
-                    id="speech-search-input"
-                    value={speechSearchText}
-                    onChange={(e) => setSpeechSearchText(e.target.value)}
-                    placeholder="输入要检索的讲话内容"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        openSpeechDatabaseSearch();
-                      }
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = "copy";
-                      setDragOverTarget('speech');
-                    }}
-                    onDragLeave={() => setDragOverTarget((v) => v === 'speech' ? null : v)}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const text = e.dataTransfer.getData('text/plain');
-                      if (text) setSpeechSearchText(text);
-                      setDragOverTarget(null);
-                    }}
-                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
-                      dragOverTarget === 'speech'
-                        ? 'border-sky-500 ring-2 ring-sky-300 dark:border-sky-400 dark:ring-sky-500/40'
-                        : 'border-sky-200 dark:border-sky-800'
-                    }`}
-                  />
-                  <p className="mt-3 text-xs text-sky-800/80 dark:text-sky-200/70">按 Enter 搜索，按 Shift + Enter 换行。</p>
-                </div>
-              </section>
             </div>
           </aside>
 
-          <div className="flex min-h-0 items-center justify-center rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-1">
-            <div className="flex w-full min-w-0 flex-nowrap items-center justify-center gap-3 overflow-x-auto text-sm [scrollbar-width:thin]">
-              <div className="flex shrink-0 items-center gap-2">
+          <div className="flex min-h-0 items-center justify-start rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-1">
+            <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-x-3 gap-y-2 text-sm">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <button
                   type="button"
                   disabled={pageNumber <= 1 || !pdfDoc}
@@ -1734,7 +1735,7 @@ export default function PdfReviewer() {
               <div className="shrink-0 rounded-xl bg-neutral-100 px-3 py-2 leading-none text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
                 第 {pageNumber} / {numPages || "—"} 页
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <span className="text-neutral-500 dark:text-neutral-400">跳转到</span>
                 <input
                   type="number"
@@ -1749,7 +1750,7 @@ export default function PdfReviewer() {
                       jumpToPage();
                     }
                   }}
-                  className="w-20 rounded-xl border border-neutral-300 bg-white px-3 py-2 leading-none text-sm dark:border-neutral-700 dark:bg-neutral-950"
+                  className="w-[4.5ch] min-w-[2.5rem] max-w-[3.75rem] rounded-xl border border-neutral-300 bg-white px-1 py-2 text-center tabular-nums leading-none text-sm [appearance:textfield] dark:border-neutral-700 dark:bg-neutral-950 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 />
                 <button
                   type="button"
@@ -1760,18 +1761,50 @@ export default function PdfReviewer() {
                   跳转
                 </button>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-initial">
                 <span className="whitespace-nowrap text-neutral-500 dark:text-neutral-400">缩放</span>
-                <input
-                  type="range"
-                  min={0.6}
-                  max={2}
-                  step={0.1}
-                  value={scale}
-                  onChange={(e) => setScale(Number(e.target.value))}
-                  className="m-0 h-2 w-24 cursor-pointer align-middle sm:w-28"
-                />
-                <span className="min-w-12 shrink-0 tabular-nums text-neutral-700 dark:text-neutral-200">{scale.toFixed(1)}×</span>
+                <button
+                  type="button"
+                  disabled={!pdfDoc || scale <= 0.6}
+                  aria-label="缩小"
+                  title="缩小 0.1×"
+                  onClick={() =>
+                    setScale((s) => Math.max(0.6, Math.round((Math.min(s, 2) - 0.1) * 10) / 10))
+                  }
+                  className="rounded-xl border border-neutral-300 px-2.5 py-2 text-sm font-medium leading-none text-neutral-700 transition hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
+                >
+                  −
+                </button>
+                <div className="relative flex h-8 w-[6.5rem] shrink-0 items-center justify-center sm:w-28">
+                  <input
+                    type="range"
+                    min={0.6}
+                    max={2}
+                    step={0.1}
+                    value={scale}
+                    disabled={!pdfDoc}
+                    onChange={(e) =>
+                      setScale(Math.round(Number(e.target.value) * 10) / 10)
+                    }
+                    className="pdf-scale-slider relative z-0 m-0 h-2 w-full cursor-pointer align-middle"
+                    style={{ backgroundSize: `${scaleSliderPercent} 100%, 100% 100%` }}
+                  />
+                  <span className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 rounded bg-white/90 px-1 text-[11px] font-semibold tabular-nums leading-none text-neutral-800 shadow-sm dark:bg-neutral-950/90 dark:text-neutral-100">
+                    {scale.toFixed(1)}×
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={!pdfDoc || scale >= 2}
+                  aria-label="放大"
+                  title="放大 0.1×"
+                  onClick={() =>
+                    setScale((s) => Math.min(2, Math.round((Math.max(s, 0.6) + 0.1) * 10) / 10))
+                  }
+                  className="rounded-xl border border-neutral-300 px-2.5 py-2 text-sm font-medium leading-none text-neutral-700 transition hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
+                >
+                  +
+                </button>
               </div>
             </div>
           </div>
@@ -1897,7 +1930,7 @@ export default function PdfReviewer() {
                 </div>
               </div>
             )}
-            <div className="flex min-h-full w-full flex-col items-center justify-center">
+            <div className="flex min-h-full w-full flex-col items-center justify-start">
             {docLoading && <p className="text-sm text-neutral-500">正在打开 PDF…</p>}
             {docError && <p className="text-sm text-red-600">{docError}</p>}
             {!docLoading && !docError && pdfDoc && (
@@ -2053,7 +2086,7 @@ export default function PdfReviewer() {
           </div>
 
           {/* Sidebar */}
-          <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[420px]">
+          <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[360px] xl:w-[420px]">
             <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
               <div className="flex items-start justify-between gap-3">
                 <div>
