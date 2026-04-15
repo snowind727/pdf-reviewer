@@ -1307,7 +1307,7 @@ export default function PdfReviewer() {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
           <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
-            上传 PDF，可从当前页起审稿 1 到 10 页；还可选中 PDF 文字后直接调用 AI 添加批注；导出 PDF 含高亮标注与批注。
+            上传 PDF，可从当前页起审稿 1 到 10 页；还可选中 PDF 文字后直接调用 AI 添加 AI专审；导出 PDF 含高亮标注与批注。
           </p>
         </div>
 
@@ -1469,7 +1469,7 @@ export default function PdfReviewer() {
                   {[
                     "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 1 页。",
                     "如需批量处理，可把审稿页数调大，从当前页起连续审核最多 10 页。",
-                    "选中文本后可“复制文本”或直接“添加批注”。",
+                    "选中文本后可“复制”或直接“AI专审”。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
                     "「豆包搜索」：Enter 或下方按钮会复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。",
                     "若某条 AI 批注无法在 PDF 文本层定位，仍会出现在右侧批注列表中，页面上不会高亮。",
@@ -2062,7 +2062,7 @@ export default function PdfReviewer() {
                         onClick={() => void copySelectionText()}
                         className="rounded px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/10 dark:text-neutral-900 dark:hover:bg-neutral-200"
                       >
-                        {copySelectionFeedback ? "已复制" : "复制文本"}
+                        {copySelectionFeedback ? "已复制" : "复制"}
                       </button>
                       <button
                         type="button"
@@ -2072,7 +2072,7 @@ export default function PdfReviewer() {
                         onClick={() => void createAnnotationFromSelection()}
                         className="rounded bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/15 disabled:opacity-50 dark:bg-neutral-200 dark:text-neutral-900 dark:hover:bg-neutral-300"
                       >
-                        {creatingSelectionAnnotation ? "AI 生成中…" : "添加批注"}
+                        {creatingSelectionAnnotation ? "AI 生成中…" : "AI专审"}
                       </button>
                     </div>
                   </div>
