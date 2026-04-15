@@ -1736,7 +1736,6 @@ export default function PdfReviewer() {
                 第 {pageNumber} / {numPages || "—"} 页
               </div>
               <div className="flex shrink-0 flex-wrap items-center gap-2">
-                <span className="text-neutral-500 dark:text-neutral-400">跳转到</span>
                 <input
                   type="number"
                   min={1}
@@ -1761,6 +1760,7 @@ export default function PdfReviewer() {
                   跳转
                 </button>
               </div>
+
               <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-initial">
                 <span className="whitespace-nowrap text-neutral-500 dark:text-neutral-400">缩放</span>
                 <button
