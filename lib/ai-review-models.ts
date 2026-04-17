@@ -15,10 +15,7 @@ export type AiReviewModelEntry = {
 
 export const AI_REVIEW_MODELS: readonly AiReviewModelEntry[] = [
   // --- 方舟 / 豆bao（与 ark-models.ts 中顺序一致）---
-  { id: "ep-m-20260402154445-v9pc4", label: "豆包 1.5 Pro" },
-  { id: "ep-m-20260403110517-85lld", label: "豆包 Seed 2.0 Mini" },
-  { id: "ep-m-20260403110251-h85c2", label: "豆包 Seed 2.0 Lite" },
-  { id: "ep-m-20260402153013-6wjjb", label: "豆包 Seed 2.0 pro" },
+  { id: "ep-m-20260403110517-85lld", label: "豆包 Seed 2.0" },
   { id: "ep-m-20260403110750-b7p2k", label: "DeepSeek V3.2" },
   { id: "ep-m-20260403110728-mwwdv", label: "GLM 4.7" },
 ];
