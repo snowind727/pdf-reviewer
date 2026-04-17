@@ -1562,12 +1562,12 @@ export default function PdfReviewer() {
             </div>
           </div>
 
-          <aside className="lg:col-start-1 lg:row-start-2">
-            <div className="flex h-full min-h-0 flex-col gap-4">
-              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-amber-200 bg-[radial-gradient(circle_at_top_left,_rgba(253,230,138,0.35),_transparent_38%),linear-gradient(180deg,rgba(255,251,235,0.98),rgba(254,249,195,0.96))] p-5 shadow-sm dark:border-amber-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.12),_transparent_38%),linear-gradient(180deg,rgba(41,30,9,0.98),rgba(24,24,27,0.98))]">
+          <aside className="min-h-0 lg:col-start-1 lg:row-start-2 lg:sticky lg:top-4 lg:z-10 lg:self-start">
+            <div className="panel-scrollbar flex min-h-0 flex-col gap-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
+                <section className="relative flex min-h-[280px] shrink-0 flex-col overflow-hidden rounded-3xl border border-amber-200 bg-[radial-gradient(circle_at_top_left,_rgba(253,230,138,0.35),_transparent_38%),linear-gradient(180deg,rgba(255,251,235,0.98),rgba(254,249,195,0.96))] p-5 shadow-sm dark:border-amber-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.12),_transparent_38%),linear-gradient(180deg,rgba(41,30,9,0.98),rgba(24,24,27,0.98))] lg:h-[300px] lg:min-h-[300px] lg:max-h-[300px] lg:shrink-0">
                 <div className="pointer-events-none absolute -right-8 top-0 h-24 w-24 rounded-full bg-amber-200/50 blur-3xl dark:bg-amber-400/10" />
-                <div className="relative flex h-full flex-col">
-                  <h2 className="text-xl font-semibold tracking-tight text-amber-950 dark:text-amber-50">必应搜索</h2>
+                <div className="relative flex min-h-0 flex-1 flex-col">
+                  <h2 className="shrink-0 text-xl font-semibold tracking-tight text-amber-950 dark:text-amber-50">必应搜索</h2>
                   <textarea
                     id="bing-search-input"
                     value={bingSearchText}
@@ -1591,20 +1591,20 @@ export default function PdfReviewer() {
                       if (text) setBingSearchText(text);
                       setDragOverTarget(null);
                     }}
-                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-amber-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                    className={`mt-4 block min-h-[160px] flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-amber-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all lg:min-h-0 ${
                       dragOverTarget === 'bing'
                         ? 'border-amber-500 ring-2 ring-amber-300 dark:border-amber-400 dark:ring-amber-500/40'
                         : 'border-amber-200 dark:border-amber-800'
                     }`}
                   />
-                  <p className="mt-3 text-xs text-amber-900/75 dark:text-amber-100/60">按 Enter 搜索，按 Shift + Enter 换行。</p>
+                  <p className="mt-3 shrink-0 text-xs text-amber-900/75 dark:text-amber-100/60">按 Enter 搜索，按 Shift + Enter 换行。</p>
                 </div>
-              </section>
+                </section>
 
-              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-sky-200 bg-[radial-gradient(circle_at_top_left,_rgba(186,230,253,0.5),_transparent_36%),linear-gradient(180deg,rgba(240,249,255,0.98),rgba(248,250,252,0.98))] p-5 shadow-sm dark:border-sky-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_36%),linear-gradient(180deg,rgba(2,6,23,0.98),rgba(3,7,18,0.98))]">
+                <section className="relative flex min-h-[280px] shrink-0 flex-col overflow-hidden rounded-3xl border border-sky-200 bg-[radial-gradient(circle_at_top_left,_rgba(186,230,253,0.5),_transparent_36%),linear-gradient(180deg,rgba(240,249,255,0.98),rgba(248,250,252,0.98))] p-5 shadow-sm dark:border-sky-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_36%),linear-gradient(180deg,rgba(2,6,23,0.98),rgba(3,7,18,0.98))] lg:h-[300px] lg:min-h-[300px] lg:max-h-[300px] lg:shrink-0">
                 <div className="pointer-events-none absolute -left-8 top-12 h-24 w-24 rounded-full bg-sky-200/40 blur-3xl dark:bg-sky-500/10" />
-                <div className="relative flex h-full flex-col">
-                  <h2 className="text-xl font-semibold tracking-tight text-sky-950 dark:text-sky-50">重要讲话数据库</h2>
+                <div className="relative flex min-h-0 flex-1 flex-col">
+                  <h2 className="shrink-0 text-xl font-semibold tracking-tight text-sky-950 dark:text-sky-50">重要讲话数据库</h2>
                   <textarea
                     id="speech-search-input"
                     value={speechSearchText}
@@ -1628,19 +1628,19 @@ export default function PdfReviewer() {
                       if (text) setSpeechSearchText(text);
                       setDragOverTarget(null);
                     }}
-                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                    className={`mt-4 block min-h-[160px] flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-sky-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all lg:min-h-0 ${
                       dragOverTarget === 'speech'
                         ? 'border-sky-500 ring-2 ring-sky-300 dark:border-sky-400 dark:ring-sky-500/40'
                         : 'border-sky-200 dark:border-sky-800'
                     }`}
                   />
-                  <p className="mt-3 text-xs text-sky-800/80 dark:text-sky-200/70">按 Enter 搜索，按 Shift + Enter 换行。</p>
+                  <p className="mt-3 shrink-0 text-xs text-sky-800/80 dark:text-sky-200/70">按 Enter 搜索，按 Shift + Enter 换行。</p>
                 </div>
-              </section>
+                </section>
 
-              <section className="relative flex min-h-[280px] flex-1 flex-col overflow-hidden rounded-3xl border border-violet-200 bg-[radial-gradient(circle_at_top_left,_rgba(196,181,253,0.45),_transparent_36%),linear-gradient(180deg,rgba(245,243,255,0.98),rgba(250,245,255,0.98))] p-5 shadow-sm dark:border-violet-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(139,92,246,0.16),_transparent_36%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(3,7,18,0.98))]">
+                <section className="relative flex min-h-[280px] shrink-0 flex-col overflow-hidden rounded-3xl border border-violet-200 bg-[radial-gradient(circle_at_top_left,_rgba(196,181,253,0.45),_transparent_36%),linear-gradient(180deg,rgba(245,243,255,0.98),rgba(250,245,255,0.98))] p-5 shadow-sm dark:border-violet-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(139,92,246,0.16),_transparent_36%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(3,7,18,0.98))] lg:h-[300px] lg:min-h-[300px] lg:max-h-[300px] lg:shrink-0">
                 <div className="pointer-events-none absolute -right-6 bottom-8 h-20 w-20 rounded-full bg-violet-300/35 blur-3xl dark:bg-violet-500/10" />
-                <div className="relative flex h-full flex-col">
+                <div className="relative flex min-h-0 flex-1 flex-col">
                   <button
                     type="button"
                     onClick={() => void openDoubaoSpecModal()}
@@ -1648,7 +1648,7 @@ export default function PdfReviewer() {
                   >
                     修改提示
                   </button>
-                  <div className="flex min-w-0 flex-nowrap items-center gap-2 pr-16">
+                  <div className="flex min-w-0 shrink-0 flex-nowrap items-center gap-2 pr-16">
                     <h2 className="shrink-0 text-xl font-semibold tracking-tight text-violet-950 dark:text-violet-50">
                       豆包搜索
                     </h2>
@@ -1685,17 +1685,17 @@ export default function PdfReviewer() {
                       if (text) setDoubaoSearchText(text);
                       setDragOverTarget(null);
                     }}
-                    className={`mt-4 block min-h-0 flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-violet-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all ${
+                    className={`mt-4 block min-h-[148px] flex-1 resize-none rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-violet-400 dark:bg-neutral-950 dark:text-neutral-100 transition-all lg:min-h-0 ${
                       dragOverTarget === "doubao"
                         ? "border-violet-500 ring-2 ring-violet-300 dark:border-violet-400 dark:ring-violet-500/40"
                         : "border-violet-200 dark:border-violet-800"
                     }`}
                   />
-                  <p className="mt-3 text-xs leading-relaxed text-violet-900/80 dark:text-violet-200/70">
+                  <p className="mt-3 shrink-0 text-xs leading-relaxed text-violet-900/80 dark:text-violet-200/70">
                     按 Enter 或下方按钮：会将本框内容复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。
                   </p>
                   {doubaoCopyHint && (
-                    <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                    <p className="mt-2 shrink-0 text-xs font-medium text-emerald-700 dark:text-emerald-400">
                       已复制，请在新开的豆包页中粘贴。
                     </p>
                   )}
@@ -1703,12 +1703,12 @@ export default function PdfReviewer() {
                     type="button"
                     disabled={!doubaoSearchText.trim()}
                     onClick={() => void openDoubaoChat()}
-                    className="mt-2 w-full rounded-xl border border-violet-300/80 bg-white/80 px-3 py-2 text-xs font-medium text-violet-900 transition hover:bg-violet-50 disabled:opacity-40 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-100 dark:hover:bg-violet-950/70"
+                    className="mt-2 w-full shrink-0 rounded-xl border border-violet-300/80 bg-white/80 px-3 py-2 text-xs font-medium text-violet-900 transition hover:bg-violet-50 disabled:opacity-40 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-100 dark:hover:bg-violet-950/70"
                   >
                     复制并打开豆包
                   </button>
                 </div>
-              </section>
+                </section>
             </div>
           </aside>
 

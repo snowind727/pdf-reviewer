@@ -128,3 +128,29 @@ body.dragging-grab-cursor * {
   background: #2563eb;
   box-shadow: 0 1px 3px rgb(15 23 42 / 0.22);
 }
+
+.panel-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.8) transparent;
+  scrollbar-gutter: stable;
+}
+
+.panel-scrollbar::-webkit-scrollbar {
+  width: 10px;
+}
+
+.panel-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel-scrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(203, 213, 225, 0.95), rgba(148, 163, 184, 0.95));
+  background-clip: padding-box;
+}
+
+.panel-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(148, 163, 184, 0.98), rgba(100, 116, 139, 0.98));
+  background-clip: padding-box;
+}
