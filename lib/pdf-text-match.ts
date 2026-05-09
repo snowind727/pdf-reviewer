@@ -72,6 +72,55 @@ export function buildFormattedPageText(items: PdfTextRun[]): string {
   return parts.join("");
 }
 
+function normalizeReviewLineForAi(line: string): string {
+  return line
+    .replace(/([“‘「『（《〈【〔])\s+/gu, "$1")
+    .replace(/\s+([”’」』）》〉】〕])/gu, "$1")
+    .replace(/([\p{sc=Han}])\s+([“‘「『（《〈【〔])/gu, "$1$2")
+    .replace(/([”’」』）》〉】〕])\s+([\p{sc=Han}])/gu, "$1$2")
+    .replace(/([\p{sc=Han}])\s+([A-Za-z0-9Ａ-Ｚａ-ｚ０-９])/gu, "$1$2")
+    .replace(/([A-Za-z0-9Ａ-Ｚａ-ｚ０-９])\s+([\p{sc=Han}])/gu, "$1$2")
+    .replace(/([:：])\s+([“‘「『\p{sc=Han}A-Za-z0-9Ａ-Ｚａ-ｚ０-９])/gu, "$1$2")
+    .replace(/([\p{sc=Han}A-Za-z0-9Ａ-Ｚａ-ｚ０-９])\s+([:：])/gu, "$1$2")
+    .replace(/([“‘「『])\s+([A-Za-z0-9Ａ-Ｚａ-ｚ０-９])/gu, "$1$2")
+    .replace(/([A-Za-z0-9Ａ-Ｚａ-ｚ０-９])\s+([”’」』])/gu, "$1$2");
+}
+
+function isLikelyCatalogOrTitleLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return (
+    /\/\s*[0-9０-９]{2,4}$/.test(trimmed) ||
+    /^目\s*录$/.test(trimmed) ||
+    /^第[一二三四五六七八九十0-9０-９]+部分/.test(trimmed)
+  );
+}
+
+function normalizeCatalogOrTitleLineForAi(line: string): string {
+  return line
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s*([:：])\s*/gu, "$1")
+    .replace(/\s*([—-]{2,})\s*/gu, "$1")
+    .replace(/([\p{sc=Han}A-Za-z0-9Ａ-Ｚａ-ｚ０-９])\s+([/／])/gu, "$1$2")
+    .replace(/([/／])\s+([0-9０-９])/gu, "$1$2");
+}
+
+/**
+ * 发给 AI 审稿使用的文本：保留换行与段落，但尽量消除 PDF 文本层常见伪空格。
+ * 这只影响 AI 审稿输入，不影响页面高亮定位；定位仍然使用原始 flatText。
+ */
+export function buildReviewPageText(items: PdfTextRun[]): string {
+  return buildFormattedPageText(items)
+    .split("\n")
+    .map((line) => {
+      const normalized = normalizeReviewLineForAi(line);
+      return isLikelyCatalogOrTitleLine(normalized)
+        ? normalizeCatalogOrTitleLineForAi(normalized)
+        : normalized;
+    })
+    .join("\n");
+}
+
 export function buildCharToItemMap(items: PdfTextRun[]): {
   text: string;
   charToItem: number[];

@@ -11,6 +11,8 @@ export const textRangeSchema = z
   .refine((r) => r.start < r.end, { message: "textRange: start < end" });
 
 export const issueSchema = z.object({
+  /** 所在页的 0-based 索引；多页审稿时必须返回，单页时可省略 */
+  pageIndex: z.number().int().nonnegative().optional(),
   excerpt: z.string(),
   reason: z.string(),
   /** 具体修改意见，如「建议替换为：xxx」「建议删除」 */
@@ -35,6 +37,7 @@ export type ReviewResponse = z.infer<typeof reviewResponseSchema>;
 export type TextRange = z.infer<typeof textRangeSchema>;
 
 export type NormalizedReviewIssue = {
+  pageIndex: number;
   excerpt: string;
   reason: string;
   suggestion: string;

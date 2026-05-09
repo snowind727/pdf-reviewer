@@ -17,21 +17,56 @@ import { EDITOR_PUBLISHING_SPEC } from "@/lib/editor-spec";
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
 const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
 const reviewModeSchema = z.enum(["precise", "discover-more"]);
-
-const bodySchema = z.object({
+const reviewPageInputSchema = z.object({
   pageIndex: z.number().int().nonnegative(),
   text: z.string().max(50000),
+});
+
+const bodySchema = z.object({
+  pageIndex: z.number().int().nonnegative().optional(),
+  text: z.string().max(50000).optional(),
+  pages: z.array(reviewPageInputSchema).min(1).max(5).optional(),
   mode: reviewModeSchema.optional(),
   checkPunctuation: z.boolean().optional(),
   /** 统一模型，见 lib/ai-review-models.ts */
   model: z.enum(AI_REVIEW_MODEL_ZOD_ENUM).optional(),
+}).superRefine((data, ctx) => {
+  if (Array.isArray(data.pages) && data.pages.length > 0) {
+    const seen = new Set<number>();
+    for (const page of data.pages) {
+      if (seen.has(page.pageIndex)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pages"],
+          message: `pages 中存在重复 pageIndex: ${page.pageIndex}`,
+        });
+      }
+      seen.add(page.pageIndex);
+    }
+    return;
+  }
+
+  if (data.pageIndex === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["pageIndex"],
+      message: "缺少 pageIndex",
+    });
+  }
+  if (data.text === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["text"],
+      message: "缺少 text",
+    });
+  }
 });
 
 /** 任务指令 + JSON 输出格式（与编辑规范拼接组成完整 system prompt） */
 const TASK_INSTRUCTIONS = `
 ---
 
-当前任务：用户会提供 **PDF 某一页** 的纯文本（保留了原始排版的换行与段落）。请在该页范围内，依据以上规范发现问题并给出修改建议。单页无法核实的项（如全书术语统一、参考文献全文）请标 kind 为 suspected 并说明需扩展核对范围。
+当前任务：用户会提供 **PDF 一页或连续多页** 的纯文本（保留了原始排版的换行与段落）。请结合这些页面的上下文关系审稿，但**每条问题都必须明确落在其中某一页**，并返回该条问题所在页的 pageIndex（0-based，用户消息中会标出）。单页无法核实的项（如全书术语统一、参考文献全文）请标 kind 为 suspected 并说明需扩展核对范围。
 
 必须只输出一个 JSON 对象，不要 Markdown，不要代码围栏。
 **JSON 语法硬性要求**：excerpt、suggestion、reason 等所有字符串值内，若必须出现 ASCII 英文双引号 "，请写成转义形式 \\"。为避免解析风险，能不用引号就尽量不用；需要保留原文或说明改法时，也可以直接写成“改为：……”这类自然中文。
@@ -51,6 +86,7 @@ const TASK_INSTRUCTIONS = `
 结构为：
 {"issues":[
   {
+    "pageIndex":0,
     "excerpt":"用于在页面上精确标出的最短连续原文，必须逐字来自本页文本（忽略换行符）。只包含有问题的字、词或标点，不要包含前后无关的标题或整句（例如只删「|」则 excerpt 仅为「|」，不要写成「| 编写说明」）",
     "kind":"error 或 suspected",
     "suggestion":"修改意见，用简短可操作的中文。删除类请写清对象，例如：删除字符：|；替换类：建议替换为：xxx",
@@ -59,6 +95,7 @@ const TASK_INSTRUCTIONS = `
 ]}
 
 字段说明：
+- pageIndex 必填：该问题所在页的 0-based 索引，必须与用户消息中提供的页面标识一致。即使只给了一页，也要尽量填写该页的 pageIndex。
 - excerpt 越短越好，且须与页面文本逐字一致（忽略换行）。程序会用 excerpt 在 PDF 文本层中搜索并高亮对应位置。扫描件常见 l/| 混淆时，可写你看到的字形；程序会尝试少量等价字形匹配。
 - excerpt 必须是从「页面文本」中直接复制出的原文，不能脑补、不能纠正错别字后再填写、不能把「地」改成「的」或把原文没有的字补进去。例如原文是「并诚挚地欢迎」，excerpt 不能写成「诚挚的欢迎」。
 - excerpt 中的**引号、括号、书名号**必须与页面文本**字符级一致**：不要把页面里的「」改成 "，也不要把 " 改成「」，除非页面文本里本来就是该字符。
@@ -111,12 +148,16 @@ function buildPunctuationInstructions(checkPunctuation: boolean): string {
 - 用户当前不希望重点检查排版格式、符号、标点、引号、括号、分隔符、空格、页码、页眉页脚、目录页码等问题
 - 对纯符号、纯标点、引号样式、全半角、成对符号、顿号/逗号/分号/句号、孤立页码、数字间空格、目录页码样式等问题，默认不要返回
 - 尤其不要因为 PDF 排版、断行、文本抽取噪声导致的符号异常、页码空格或版式问题而报问题
+- 页面文本来自 PDF 文本层抽取，行内空格、引号两侧空格、全角/半角英数字、异常字形、乱码标点，都很可能只是文本层噪声；不要仅据此报错
+- 目录页、标题行、页码行尤其容易出现这类抽取噪声；如果只是“国潮”两侧空格、ＩＰ/ＡＩ 全角字母、ꎬ 这类字符差异，默认忽略，不要返回
 - 只有当这类问题已经明显影响语义理解、事实表达或版面内容正确性时，才可少量返回，并在 reason 中明确说明影响`;
 }
 
 function buildSystemPrompt(mode: ReviewMode, checkPunctuation: boolean): string {
   return `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}${buildPunctuationInstructions(checkPunctuation)}`;
 }
+
+type ReviewPageInput = z.infer<typeof reviewPageInputSchema>;
 
 function normalizeWhitespaceForMatch(value: string): string {
   return value.replace(/\s+/g, "");
@@ -169,11 +210,34 @@ function canonicalizeExcerptToPageText(pageText: string, excerpt: string): strin
   return findUniqueLooseMatch(pageText, needle);
 }
 
-function sanitizeIssuesForPageText(pageText: string, review: ReturnType<typeof parseReviewJson>) {
+function sanitizeIssuesForPages(
+  pages: ReviewPageInput[],
+  review: ReturnType<typeof parseReviewJson>,
+) {
+  const pageMap = new Map(pages.map((page) => [page.pageIndex, page.text]));
+  const singlePageIndex = pages.length === 1 ? pages[0]?.pageIndex ?? null : null;
+
   return review.issues.flatMap((issue) => {
+    const pageIndex =
+      typeof issue.pageIndex === "number" && Number.isInteger(issue.pageIndex)
+        ? issue.pageIndex
+        : singlePageIndex;
+
+    if (pageIndex === null || !pageMap.has(pageIndex)) {
+      console.log("[review-page] 丢弃页码缺失或非法的 issue:", {
+        pageIndex: issue.pageIndex,
+        excerpt: issue.excerpt,
+        suggestion: issue.suggestion?.slice(0, 120) ?? "",
+        reason: issue.reason.slice(0, 120),
+      });
+      return [];
+    }
+
+    const pageText = pageMap.get(pageIndex)!;
     const canonicalExcerpt = canonicalizeExcerptToPageText(pageText, issue.excerpt);
     if (!canonicalExcerpt) {
       console.log("[review-page] 丢弃未命中原文的 issue:", {
+        pageIndex,
         excerpt: issue.excerpt,
         suggestion: issue.suggestion?.slice(0, 120) ?? "",
         reason: issue.reason.slice(0, 120),
@@ -182,70 +246,148 @@ function sanitizeIssuesForPageText(pageText: string, review: ReturnType<typeof p
     }
     if (canonicalExcerpt !== issue.excerpt) {
       console.log("[review-page] 已将 excerpt 对齐回原文:", {
+        pageIndex,
         from: issue.excerpt,
         to: canonicalExcerpt,
       });
     }
-    return [{ ...issue, excerpt: canonicalExcerpt }];
+    return [{ ...issue, pageIndex, excerpt: canonicalExcerpt }];
   });
+}
+
+function buildUserContent(pages: ReviewPageInput[]): string {
+  return pages
+    .map(
+      (page) =>
+        `--- 页面 pageIndex=${page.pageIndex}（第 ${page.pageIndex + 1} 页） ---\n${page.text}`,
+    )
+    .join("\n\n");
+}
+
+function summarizeIssueCountByPage(
+  issues: Array<{ pageIndex: number }>,
+): Record<string, number> {
+  const summary: Record<string, number> = {};
+  for (const issue of issues) {
+    const key = `page-${issue.pageIndex + 1}`;
+    summary[key] = (summary[key] ?? 0) + 1;
+  }
+  return summary;
 }
 
 function stripWhitespace(value: string): string {
   return value.replace(/\s+/g, "");
 }
 
-function isPunctuationOnlyText(value: string): boolean {
-  const normalized = stripWhitespace(value);
-  if (!normalized) return false;
-  return /^[\p{P}\p{S}]+$/u.test(normalized);
+function toHalfwidthAscii(value: string): string {
+  return value.replace(/[！-～]/g, (char) =>
+    String.fromCharCode(char.charCodeAt(0) - 0xfee0),
+  );
 }
 
-function isPageNumberLikeText(value: string): boolean {
-  const normalized = stripWhitespace(value);
-  if (!normalized) return false;
-  if (/^\d{1,5}$/.test(normalized)) return true;
-  if (/^[ivxlcdm]{1,8}$/i.test(normalized)) return true;
-  return false;
+function normalizeFormattingComparableText(value: string): string {
+  return stripWhitespace(
+    toHalfwidthAscii(value)
+      .replace(/[“”「」]/g, '"')
+      .replace(/[‘’『』]/g, "'")
+      .replace(/[：]/g, ":")
+      .replace(/[，、ꎬ]/g, ",")
+      .replace(/[；]/g, ";")
+      .replace(/[。]/g, ".")
+      .replace(/[（]/g, "(")
+      .replace(/[）]/g, ")"),
+  ).toLowerCase();
 }
 
-function looksLikePunctuationIssue(
+function extractSuggestedReplacement(suggestion?: string): string | null {
+  if (!suggestion) return null;
+  const matched = suggestion.match(/改为[:：]\s*(.+)\s*$/);
+  return matched?.[1]?.trim() || null;
+}
+
+function looksLikeFormattingNoiseIssue(
   issue: { excerpt: string; suggestion?: string; reason: string },
 ): boolean {
   const combined = `${issue.excerpt} ${issue.suggestion ?? ""} ${issue.reason}`;
   const formattingKeywords =
-    /标点|符号|引号|括号|书名号|顿号|逗号|句号|分号|冒号|问号|叹号|破折号|省略号|全角|半角|配对|闭合|开引号|闭引号|空格|留白|间距|排版|版式|格式|对齐|缩进|换行|断行|分页|页码|页眉|页脚|目录/u;
+    /标点|符号|引号|括号|书名号|顿号|逗号|句号|分号|冒号|问号|叹号|破折号|省略号|全角|半角|配对|闭合|开引号|闭引号|空格|留白|间距|排版|版式|格式|对齐|缩进|换行|断行|分页|页码|页眉|页脚|目录|乱码|字形|文本层|抽取噪声/u;
   const contentKeywords =
     /错别字|病句|语法|语义|事实|数字错误|年份|人名|地名|术语|单位|数据|引用|出处/u;
-  const suggestionNormalized = stripWhitespace(issue.suggestion ?? "");
-  const excerptNormalized = stripWhitespace(issue.excerpt);
-  const suggestedReplacement = suggestionNormalized.replace(/^建议替换为：/, "");
+  const replacement = extractSuggestedReplacement(issue.suggestion);
 
-  if (isPunctuationOnlyText(issue.excerpt)) return true;
-  if (isPageNumberLikeText(issue.excerpt)) return true;
-  if (
-    suggestionNormalized.startsWith("建议替换为：") &&
-    excerptNormalized &&
-    excerptNormalized !== suggestedReplacement &&
-    isPageNumberLikeText(suggestedReplacement)
-  ) {
-    return true;
+  if (replacement) {
+    const excerptComparable = normalizeFormattingComparableText(issue.excerpt);
+    const replacementComparable = normalizeFormattingComparableText(replacement);
+    if (excerptComparable && excerptComparable === replacementComparable) {
+      return true;
+    }
   }
-  if (
-    excerptNormalized &&
-    suggestionNormalized &&
-    suggestionNormalized === `建议替换为：${excerptNormalized}`
-  ) {
-    return true;
-  }
+
   return formattingKeywords.test(combined) && !contentKeywords.test(combined);
 }
 
-function applyPunctuationPreference<T extends { excerpt: string; suggestion?: string; reason: string }>(
+function filterFormattingNoiseIssues<T extends { pageIndex: number; excerpt: string; suggestion?: string; reason: string }>(
   issues: T[],
   checkPunctuation: boolean,
 ): T[] {
   if (checkPunctuation) return issues;
-  return issues.filter((issue) => !looksLikePunctuationIssue(issue));
+  return issues.filter((issue) => !looksLikeFormattingNoiseIssue(issue));
+}
+
+function normalizeReviewResult(
+  pages: ReviewPageInput[],
+  raw: string,
+  checkPunctuation: boolean,
+) {
+  const review = parseReviewJson(raw);
+  const sanitizedIssues = sanitizeIssuesForPages(pages, review).map((issue) => ({
+    pageIndex: issue.pageIndex,
+    excerpt: issue.excerpt,
+    reason: issue.reason,
+    suggestion: issue.suggestion?.trim() || "",
+    kind: normalizeIssueKind(issue),
+    textRange: issue.textRange,
+  }));
+  const returnedIssues = filterFormattingNoiseIssues(sanitizedIssues, checkPunctuation);
+
+  console.log("[review-page] 请求页面:", pages.map((page) => page.pageIndex + 1));
+  console.log("[review-page] AI 原始 issues:", review.issues.length, "条");
+  console.log(
+    "[review-page] AI 原始每页分布:",
+    summarizeIssueCountByPage(
+      review.issues.flatMap((issue) =>
+        typeof issue.pageIndex === "number" ? [{ pageIndex: issue.pageIndex }] : [],
+      ),
+    ),
+  );
+  console.log("[review-page] 清洗后 issues:", sanitizedIssues.length, "条");
+  console.log(
+    "[review-page] 清洗后每页分布:",
+    summarizeIssueCountByPage(sanitizedIssues),
+  );
+  if (!checkPunctuation) {
+    console.log(
+      "[review-page] 关闭排版/符号检查后过滤掉:",
+      sanitizedIssues.length - returnedIssues.length,
+      "条",
+    );
+  }
+  console.log("[review-page] 最终返回 issues:", returnedIssues.length, "条");
+  console.log(
+    "[review-page] 最终返回每页分布:",
+    summarizeIssueCountByPage(returnedIssues),
+  );
+
+  return {
+    issues: returnedIssues.map((issue) => ({
+      pageIndex: issue.pageIndex,
+      excerpt: issue.excerpt,
+      reason: issue.reason,
+      suggestion: issue.suggestion,
+      kind: issue.kind,
+      textRange: issue.textRange,
+    })),
+  };
 }
 
 /** Anthropic Messages API 响应（MiniMax 兼容层，非流式） */
@@ -310,7 +452,11 @@ export async function POST(req: Request) {
     );
   }
 
-  const { text, mode = "precise", checkPunctuation = false, model: modelParam } = parsed.data;
+  const { mode = "precise", checkPunctuation = false, model: modelParam } = parsed.data;
+  const pages =
+    parsed.data.pages && parsed.data.pages.length > 0
+      ? parsed.data.pages
+      : [{ pageIndex: parsed.data.pageIndex!, text: parsed.data.text! }];
   const modelId = modelParam ?? DEFAULT_AI_REVIEW_MODEL_ID;
   const provider = getAiReviewProvider(modelId);
   const minimaxModel = provider === "minimax" ? modelId : undefined;
@@ -318,11 +464,12 @@ export async function POST(req: Request) {
 
   const systemPrompt = buildSystemPrompt(mode, checkPunctuation);
   const temperature = REVIEW_MODE_CONFIG[mode].temperature;
-  const userContent = `--- 页面文本 ---\n${text}`;
+  const userContent = buildUserContent(pages);
+  const reviewablePages = pages.filter((page) => page.text.trim());
 
-  if (!text.trim()) {
+  if (reviewablePages.length === 0) {
     return NextResponse.json(
-      { issues: [], notice: "本页无可用文本层，无法精确定位；可更换为可复制文本的 PDF。" },
+      { issues: [], notice: "所选页面均无可用文本层，无法精确定位；可更换为可复制文本的 PDF。" },
       { status: 200 },
     );
   }
@@ -365,23 +512,7 @@ export async function POST(req: Request) {
       console.log(raw);
 
       try {
-        const review = parseReviewJson(raw);
-        const normalized = {
-          issues: applyPunctuationPreference(
-            sanitizeIssuesForPageText(text, review).map((issue) => ({
-              excerpt: issue.excerpt,
-              reason: issue.reason,
-              suggestion: issue.suggestion?.trim() || "",
-              kind: normalizeIssueKind(issue),
-            })),
-            checkPunctuation,
-          ).map((issue) => ({
-            excerpt: issue.excerpt,
-            reason: issue.reason,
-            suggestion: issue.suggestion,
-            kind: issue.kind,
-          })),
-        };
+        const normalized = normalizeReviewResult(reviewablePages, raw, checkPunctuation);
         console.log("[review-page] 解析成功，issues:", normalized.issues.length, "条");
         console.log("[review-page] ========== AI 请求结束（成功） ==========");
         return NextResponse.json(normalized);
@@ -569,23 +700,7 @@ export async function POST(req: Request) {
     console.log(raw);
 
     try {
-      const review = parseReviewJson(raw);
-      const normalized = {
-        issues: applyPunctuationPreference(
-          sanitizeIssuesForPageText(text, review).map((issue) => ({
-            excerpt: issue.excerpt,
-            reason: issue.reason,
-            suggestion: issue.suggestion?.trim() || "",
-            kind: normalizeIssueKind(issue),
-          })),
-          checkPunctuation,
-        ).map((issue) => ({
-          excerpt: issue.excerpt,
-          reason: issue.reason,
-          suggestion: issue.suggestion,
-          kind: issue.kind,
-        })),
-      };
+      const normalized = normalizeReviewResult(reviewablePages, raw, checkPunctuation);
       console.log("[review-page] 解析成功，issues:", normalized.issues.length, "条");
       console.log("[review-page] ========== AI 请求结束（成功） ==========");
       return NextResponse.json(normalized);

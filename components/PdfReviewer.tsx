@@ -16,6 +16,7 @@ import {
 import {
   getPageTextItems,
   buildFormattedPageText,
+  buildReviewPageText,
   matchIssuesToCharRanges,
   charRangeToPdfBoxes,
   resolveIssueCharRange,
@@ -91,6 +92,9 @@ function genId(): string {
   return `ann_${Date.now()}_${++_nextId}`;
 }
 
+const REVIEW_PAGE_COUNT_OPTIONS = [1, 5, 10, 20, 30, 40, 50] as const;
+const REVIEW_REQUEST_CHUNK_SIZE = 5;
+
 function resolveAnnotationRangeWithinSelection(
   text: string,
   selectionRange: [number, number],
@@ -142,6 +146,7 @@ export default function PdfReviewer() {
 
   /* --- Annotations (unified: AI + manual) ------------------------- */
   const [pageAnnotations, setPageAnnotations] = useState<Record<number, Annotation[]>>({});
+  const [aiReviewedPages, setAiReviewedPages] = useState<Record<number, true>>({});
   const pageFlatTextRef = useRef<Record<number, string>>({});
 
   const [textLayerReady, setTextLayerReady] = useState(false);
@@ -151,11 +156,11 @@ export default function PdfReviewer() {
   const [punctuationReviewMode, setPunctuationReviewMode] =
     useState<PunctuationReviewMode>("ignore");
   const [aiModelId, setAiModelId] = useState(DEFAULT_AI_REVIEW_MODEL_ID);
-  const [batchReviewCount, setBatchReviewCount] = useState(1);
+  const [batchReviewCount, setBatchReviewCount] = useState(10);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
     total: number;
-    currentPage: number;
+    currentRangeLabel: string;
   } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -292,6 +297,7 @@ export default function PdfReviewer() {
       setDocError(null);
       setNotice(null);
       setPageAnnotations({});
+      setAiReviewedPages({});
       pageFlatTextRef.current = {};
       setScreenAnnotations([]);
       setActiveAnnotationTarget(null);
@@ -586,9 +592,10 @@ export default function PdfReviewer() {
     const items = getPageTextItems(tc.items as unknown[]);
     const flatText = items.map((i) => i.str).join("");
     const formattedText = buildFormattedPageText(items);
+    const reviewText = buildReviewPageText(items);
 
     pageFlatTextRef.current[targetPageNumber] = flatText;
-    return { flatText, formattedText };
+    return { flatText, formattedText, reviewText };
   }, [pdfDoc]);
 
   const focusAnnotation = useCallback((target: AnnotationTarget) => {
@@ -1027,11 +1034,22 @@ export default function PdfReviewer() {
   }, [doubaoSearchText, doubaoAttachSpec]);
 
   /* --- AI review -------------------------------------------------- */
-  const reviewSinglePage = useCallback(async (targetPageNumber: number, mode: ReviewMode) => {
-    const { flatText, formattedText } = await loadPageText(targetPageNumber);
+  const reviewPageBatch = useCallback(async (targetPageNumbers: number[], mode: ReviewMode) => {
+    const pagePayload = await Promise.all(
+      targetPageNumbers.map(async (targetPageNumber) => {
+        const { flatText, reviewText } = await loadPageText(targetPageNumber);
+        return {
+          pageNumber: targetPageNumber,
+          flatText,
+          reviewText: reviewText.slice(0, 48000),
+        };
+      }),
+    );
     const body = JSON.stringify({
-      pageIndex: targetPageNumber - 1,
-      text: formattedText.slice(0, 48000),
+      pages: pagePayload.map((page) => ({
+        pageIndex: page.pageNumber - 1,
+        text: page.reviewText,
+      })),
       mode,
       checkPunctuation: punctuationReviewMode === "check",
       model: aiModelId,
@@ -1066,21 +1084,46 @@ export default function PdfReviewer() {
 
       if (res.ok) {
         const issues = (data.issues ?? []) as NormalizedReviewIssue[];
-        const matches = matchIssuesToCharRanges(flatText, issues);
-        const aiAnnotations: Annotation[] = matches.map((m) => ({
-          id: genId(),
-          source: "ai" as const,
-          excerpt: m.excerpt,
-          kind: m.kind,
-          suggestion: m.suggestion ?? "",
-          reason: m.reason,
-          charRange: m.charRange ?? null,
-        }));
+        const pageIssueMap = new Map<number, NormalizedReviewIssue[]>();
+        const requestedPageSet = new Set(targetPageNumbers);
+        const fallbackPageNumber = targetPageNumbers[0] ?? 1;
+
+        for (const issue of issues) {
+          const targetPageNumber =
+            typeof issue.pageIndex === "number" ? issue.pageIndex + 1 : fallbackPageNumber;
+          if (!requestedPageSet.has(targetPageNumber)) continue;
+          const existing = pageIssueMap.get(targetPageNumber);
+          if (existing) existing.push(issue);
+          else pageIssueMap.set(targetPageNumber, [issue]);
+        }
 
         setPageAnnotations((prev) => {
-          const existing = prev[targetPageNumber] ?? [];
-          const preserved = existing.filter((a) => a.source !== "ai");
-          return { ...prev, [targetPageNumber]: [...aiAnnotations, ...preserved] };
+          const next = { ...prev };
+
+          for (const page of pagePayload) {
+            const pageIssues = pageIssueMap.get(page.pageNumber) ?? [];
+            const matches = matchIssuesToCharRanges(page.flatText, pageIssues);
+            const aiAnnotations: Annotation[] = matches.map((m) => ({
+              id: genId(),
+              source: "ai" as const,
+              excerpt: m.excerpt,
+              kind: m.kind,
+              suggestion: m.suggestion ?? "",
+              reason: m.reason,
+              charRange: m.charRange ?? null,
+            }));
+
+            const existing = prev[page.pageNumber] ?? [];
+            const preserved = existing.filter((a) => a.source !== "ai");
+            next[page.pageNumber] = [...aiAnnotations, ...preserved];
+          }
+
+          return next;
+        });
+        setAiReviewedPages((prev) => {
+          const next = { ...prev };
+          for (const page of pagePayload) next[page.pageNumber] = true;
+          return next;
         });
         return;
       }
@@ -1093,7 +1136,11 @@ export default function PdfReviewer() {
       if (reviewResponseRetryable(res.status)) {
         throw new Error("AI审稿异常，请稍后再试");
       }
-      throw new Error(typeof data.error === "string" ? data.error : `第 ${targetPageNumber} 页审稿请求失败`);
+      const pageLabel =
+        targetPageNumbers.length <= 1
+          ? `第 ${targetPageNumbers[0]} 页`
+          : `第 ${targetPageNumbers[0]}-${targetPageNumbers[targetPageNumbers.length - 1]} 页`;
+      throw new Error(typeof data.error === "string" ? data.error : `${pageLabel} 审稿请求失败`);
     }
 
     throw new Error("AI审稿异常，请稍后再试");
@@ -1102,28 +1149,47 @@ export default function PdfReviewer() {
   const runAiReview = useCallback(async () => {
     if (!pdfDoc) return;
     const startPage = pageNumber;
-    const total = Math.min(10, Math.max(1, numPages - startPage + 1), Math.max(1, batchReviewCount));
+    const total = Math.min(
+      Math.max(1, numPages - startPage + 1),
+      Math.max(1, batchReviewCount),
+    );
+    const targetPageNumbers = Array.from({ length: total }, (_, offset) => startPage + offset);
+    const initialChunkLastPage =
+      targetPageNumbers[Math.min(targetPageNumbers.length, REVIEW_REQUEST_CHUNK_SIZE) - 1] ?? startPage;
 
     setError(null);
     setNotice(null);
-    setBatchReviewProgress({ done: 0, total, currentPage: startPage });
+    setBatchReviewProgress({
+      done: 0,
+      total,
+      currentRangeLabel:
+        total === 1 ? `第 ${startPage} 页` : `第 ${startPage}-${initialChunkLastPage} 页`,
+    });
     const failedPages: number[] = [];
     let firstFailedMessage: string | null = null;
     try {
-      for (let offset = 0; offset < total; offset += 1) {
-        const targetPageNumber = startPage + offset;
-        setBatchReviewProgress({ done: offset, total, currentPage: targetPageNumber });
+      for (let offset = 0; offset < targetPageNumbers.length; offset += REVIEW_REQUEST_CHUNK_SIZE) {
+        const chunkPages = targetPageNumbers.slice(offset, offset + REVIEW_REQUEST_CHUNK_SIZE);
+        const chunkLabel =
+          chunkPages.length === 1
+            ? `第 ${chunkPages[0]} 页`
+            : `第 ${chunkPages[0]}-${chunkPages[chunkPages.length - 1]} 页`;
+        setBatchReviewProgress({ done: offset, total, currentRangeLabel: chunkLabel });
         try {
-          await reviewSinglePage(targetPageNumber, reviewMode);
+          await reviewPageBatch(chunkPages, reviewMode);
         } catch (e) {
-          failedPages.push(targetPageNumber);
+          failedPages.push(...chunkPages);
           if (!firstFailedMessage && e instanceof Error) {
             firstFailedMessage = e.message;
           }
-          console.error(`[batch-review] 第 ${targetPageNumber} 页审稿失败:`, e);
+          console.error(`[batch-review] ${chunkLabel} 审稿失败:`, e);
         }
       }
-      setBatchReviewProgress({ done: total, total, currentPage: startPage + total - 1 });
+      const finalLabel =
+        targetPageNumbers.length === 1
+          ? `第 ${targetPageNumbers[0]} 页`
+          : `第 ${targetPageNumbers[0]}-${targetPageNumbers[targetPageNumbers.length - 1]} 页`;
+      setBatchReviewProgress({ done: total, total, currentRangeLabel: finalLabel });
       if (failedPages.length > 0) {
         if (total === 1) {
           setError(firstFailedMessage ?? `第 ${startPage} 页审稿失败`);
@@ -1144,7 +1210,7 @@ export default function PdfReviewer() {
     } finally {
       setBatchReviewProgress(null);
     }
-  }, [batchReviewCount, numPages, pageNumber, pdfDoc, reviewMode, reviewSinglePage]);
+  }, [batchReviewCount, numPages, pageNumber, pdfDoc, reviewMode, reviewPageBatch]);
 
   /* --- Search logic ----------------------------------------------- */
   const performSearch = useCallback(async (q: string) => {
@@ -1285,9 +1351,9 @@ export default function PdfReviewer() {
   }, [pageAnnotations, pdfDoc]);
 
   const hasAnyAnnotations = Object.values(pageAnnotations).some((a) => a && a.length > 0);
-  const maxBatchPages = Math.min(10, Math.max(0, numPages - pageNumber + 1));
   const aiBusy = !!batchReviewProgress || !!creatingSelectionAnnotation;
   const scaleSliderPercent = `${Math.max(0, Math.min(100, ((scale - 0.6) / 1.4) * 100))}%`;
+  const isCurrentPageReviewed = !!aiReviewedPages[pageNumber];
   const jumpToPage = useCallback(() => {
     const parsed = Number(pageJumpInput.trim());
     if (!Number.isFinite(parsed)) {
@@ -1307,7 +1373,7 @@ export default function PdfReviewer() {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
           <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
-            上传 PDF，可从当前页起审稿 1 到 10 页；还可选中 PDF 文字后直接调用 AI 添加 AI专审；导出 PDF 含高亮标注与批注。
+            上传 PDF，可从当前页起审稿 1、5、10、20、30、40、50 页；连续审稿时会把多页合并发给 AI，超过 5 页则按每 5 页分批处理。
           </p>
         </div>
 
@@ -1341,12 +1407,12 @@ export default function PdfReviewer() {
               <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
                 <span>审稿页数</span>
                 <select
-                  value={Math.min(batchReviewCount, Math.max(1, maxBatchPages))}
+                  value={batchReviewCount}
                   disabled={aiBusy || !pdfDoc}
                   onChange={(e) => setBatchReviewCount(Number(e.target.value))}
                   className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
                 >
-                  {Array.from({ length: Math.max(1, maxBatchPages) }, (_, i) => i + 1).map((count) => (
+                  {REVIEW_PAGE_COUNT_OPTIONS.map((count) => (
                     <option key={count} value={count}>
                       {count} 页
                     </option>
@@ -1413,7 +1479,7 @@ export default function PdfReviewer() {
 
         {batchReviewProgress && (
           <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">
-            正在审稿第 {batchReviewProgress.currentPage} 页，已完成 {batchReviewProgress.done} / {batchReviewProgress.total} 页。
+            正在审稿 {batchReviewProgress.currentRangeLabel}，已完成 {batchReviewProgress.done} / {batchReviewProgress.total} 页。
           </p>
         )}
         {notice && (
@@ -1467,8 +1533,9 @@ export default function PdfReviewer() {
                 </div>
                 <div className="mt-5 space-y-3">
                   {[
-                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 1 页。",
-                    "如需批量处理，可把审稿页数调大，从当前页起连续审核最多 10 页。",
+                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 10 页。",
+                    "审稿页数固定为 1、5、10、20、30、40、50；若剩余页数不足，会自动处理到文档末页。",
+                    "连续审稿会把多页内容一并发给 AI；当选择页数大于 5 时，会自动按每 5 页分批发送。",
                     "选中文本后可“复制”或直接“AI专审”。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
                     "「豆包搜索」：Enter 或下方按钮会复制到剪贴板并打开豆包，在豆包输入框手动粘贴即可。",
@@ -1838,6 +1905,11 @@ export default function PdfReviewer() {
                     下一页
                   </span>
                 </button>
+                {isCurrentPageReviewed && (
+                  <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-xl border border-emerald-200 bg-white/92 px-3 py-1.5 text-xs font-medium text-emerald-700 shadow-sm backdrop-blur-sm dark:border-emerald-900/60 dark:bg-neutral-900/92 dark:text-emerald-300">
+                    已审核
+                  </div>
+                )}
               </>
             )}
             {/* PDF Search Trigger */}
