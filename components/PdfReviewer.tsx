@@ -92,7 +92,7 @@ function genId(): string {
   return `ann_${Date.now()}_${++_nextId}`;
 }
 
-const REVIEW_PAGE_COUNT_OPTIONS = [1, 5, 10, 20, 30, 40, 50] as const;
+const REVIEW_PAGE_COUNT_OPTIONS = [1, 5, 10, 20, 30] as const;
 const REVIEW_REQUEST_CHUNK_SIZE = 5;
 
 function resolveAnnotationRangeWithinSelection(
@@ -1373,7 +1373,7 @@ export default function PdfReviewer() {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
           <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
-            上传 PDF，可从当前页起审稿 1、5、10、20、30、40、50 页；连续审稿时会把多页合并发给 AI，超过 5 页则按每 5 页分批处理。
+            上传 PDF，可从当前页起审稿 1、5、10、20、30 页；连续审稿时会把多页合并发给 AI，超过 5 页则按每 5 页分批处理。
           </p>
         </div>
 
@@ -1534,7 +1534,7 @@ export default function PdfReviewer() {
                 <div className="mt-5 space-y-3">
                   {[
                     "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 10 页。",
-                    "审稿页数固定为 1、5、10、20、30、40、50；若剩余页数不足，会自动处理到文档末页。",
+                    "审稿页数固定为 1、5、10、20、30；若剩余页数不足，会自动处理到文档末页。",
                     "连续审稿会把多页内容一并发给 AI；当选择页数大于 5 时，会自动按每 5 页分批发送。",
                     "选中文本后可“复制”或直接“AI专审”。",
                     "需要核对讲话原文时，可把内容粘贴到“重要讲话数据库”中按回车搜索。",
