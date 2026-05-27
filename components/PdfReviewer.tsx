@@ -1478,7 +1478,7 @@ export default function PdfReviewer() {
       {!isReviewViewMode && (
       <header className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
         <div>
-          <h1 className="text-2xl tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
           <p className="mt-1 text-sm tracking-wide text-neutral-500 dark:text-neutral-400">
             智能审读，精准标注，助力专业编校。
           </p>
@@ -1799,7 +1799,7 @@ export default function PdfReviewer() {
               <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-3xl border border-neutral-200 bg-white shadow-2xl dark:border-neutral-800 dark:bg-neutral-950">
                 <div className="flex shrink-0 items-start justify-between gap-4 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800">
                   <div>
-                    <h2 className="text-lg text-neutral-950 dark:text-neutral-50">修改审稿规则</h2>
+                    <h2 className="text-lg font-semibold text-neutral-950 dark:text-neutral-50">修改审稿规则</h2>
                     <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                       仅本次审稿期间有效，刷新页面后失效。批量 AI 审稿与选区「AI专审」均将使用修改后的规则。
                     </p>
