@@ -1576,7 +1576,7 @@ export default function PdfReviewer() {
             <button
               type="button"
               onClick={() => void openAiReviewSpecModal()}
-              className="inline-flex h-10 shrink-0 items-center rounded-lg border border-orange-200 bg-orange-50 px-3 text-sm font-medium text-orange-800 shadow-sm transition hover:border-orange-300 hover:bg-orange-100 dark:border-orange-800/60 dark:bg-orange-950/30 dark:text-orange-200 dark:hover:bg-orange-900/40"
+              className="inline-flex h-10 shrink-0 items-center rounded-lg border border-orange-100 bg-orange-50/60 px-3 text-sm font-medium text-orange-700/90 shadow-sm transition hover:border-orange-200 hover:bg-orange-50 dark:border-orange-900/35 dark:bg-orange-950/15 dark:text-orange-300/90 dark:hover:border-orange-800/50 dark:hover:bg-orange-950/25"
               title="修改审稿规则，仅本次审稿期间有效"
             >
               修改审稿规则
