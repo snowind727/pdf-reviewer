@@ -1628,57 +1628,6 @@ export default function PdfReviewer() {
             isReviewViewMode ? "gap-2" : "gap-4"
           }`}
         >
-          {isReviewViewMode && (
-            <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-neutral-200 bg-white px-3 py-2 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
-              <button
-                type="button"
-                onClick={() => setIsReviewViewMode(false)}
-                className="inline-flex h-8 shrink-0 items-center rounded-xl border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-700 transition hover:bg-red-100 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-200 dark:hover:bg-red-950/40"
-              >
-                退出审阅模式
-              </button>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 text-sm">
-                <button
-                  type="button"
-                  disabled={pageNumber <= 1 || !pdfDoc}
-                  className="rounded-lg border border-neutral-300 px-2.5 py-1.5 leading-none transition hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-900"
-                  onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
-                >
-                  上一页
-                </button>
-                <button
-                  type="button"
-                  disabled={pageNumber >= numPages || !pdfDoc}
-                  className="rounded-lg border border-neutral-300 px-2.5 py-1.5 leading-none transition hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-900"
-                  onClick={() => setPageNumber((p) => Math.min(numPages || p, p + 1))}
-                >
-                  下一页
-                </button>
-                <span className="rounded-lg bg-neutral-100 px-2.5 py-1.5 tabular-nums text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
-                  第 {pageNumber} / {numPages || "—"} 页
-                </span>
-              </div>
-              <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs sm:text-sm">
-                {batchReviewProgress && (
-                  <span className="text-neutral-600 dark:text-neutral-400">
-                    审稿中 {batchReviewProgress.currentRangeLabel}（{batchReviewProgress.done}/{batchReviewProgress.total}）
-                  </span>
-                )}
-                {notice && (
-                  <span
-                    className={
-                      notice.variant === "success"
-                        ? "text-emerald-700 dark:text-emerald-400"
-                        : "text-amber-700 dark:text-amber-300"
-                    }
-                  >
-                    {notice.text}
-                  </span>
-                )}
-                {error && <span className="text-red-600 dark:text-red-400">{error}</span>}
-              </div>
-            </div>
-          )}
 
           <div
             className={`flex min-h-0 flex-1 flex-col lg:flex-row ${
