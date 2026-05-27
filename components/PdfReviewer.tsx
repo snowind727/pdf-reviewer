@@ -226,6 +226,8 @@ export default function PdfReviewer() {
   const [aiReviewSpecModalOpen, setAiReviewSpecModalOpen] = useState(false);
   const [aiReviewSpecDraft, setAiReviewSpecDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+  /** 审阅模式：隐藏顶栏与页码工具条，放大 PDF 与批注工作区 */
+  const [isReviewViewMode, setIsReviewViewMode] = useState(false);
   const [dragOverTarget, setDragOverTarget] = useState<'bing' | 'speech' | 'doubao' | null>(null);
   const [isDraggingSelection, setIsDraggingSelection] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -352,6 +354,19 @@ export default function PdfReviewer() {
     },
     [fileUrl],
   );
+
+  useEffect(() => {
+    if (!fileUrl && isReviewViewMode) setIsReviewViewMode(false);
+  }, [fileUrl, isReviewViewMode]);
+
+  useEffect(() => {
+    if (!isReviewViewMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsReviewViewMode(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isReviewViewMode]);
 
   /* --- Open document ---------------------------------------------- */
   useEffect(() => {
@@ -1452,8 +1467,15 @@ export default function PdfReviewer() {
 
   /* --- Render ----------------------------------------------------- */
   return (
-    <div className="mx-auto flex min-h-0 w-full max-w-[1480px] flex-1 flex-col gap-5 px-4 pb-8 pt-2">
+    <div
+      className={`mx-auto flex min-h-0 w-full flex-1 flex-col ${
+        isReviewViewMode && fileUrl
+          ? "h-[calc(100dvh-2rem)] max-w-none gap-2 px-1 pb-2 pt-0 md:h-[calc(100dvh-3rem)] md:px-2"
+          : "max-w-[1480px] gap-5 px-4 pb-8 pt-2"
+      }`}
+    >
       {/* Header */}
+      {!isReviewViewMode && (
       <header className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
@@ -1559,6 +1581,7 @@ export default function PdfReviewer() {
             >
               修改审稿规则
             </button>
+
           </div>
 
           {PDF_EXPORT_ENABLED && (
@@ -1595,10 +1618,73 @@ export default function PdfReviewer() {
         {pdfjsError && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{pdfjsError}</p>}
         {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
       </header>
+      )}
 
       {/* Main */}
       {fileUrl && (
-        <div ref={mainAreaRef} className="relative flex min-h-0 flex-1 flex-col gap-4 lg:flex-row lg:items-start">
+        <div
+          ref={mainAreaRef}
+          className={`relative flex min-h-0 flex-1 flex-col ${
+            isReviewViewMode ? "gap-2" : "gap-4"
+          }`}
+        >
+          {isReviewViewMode && (
+            <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-neutral-200 bg-white px-3 py-2 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
+              <button
+                type="button"
+                onClick={() => setIsReviewViewMode(false)}
+                className="inline-flex h-8 shrink-0 items-center rounded-xl border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-700 transition hover:bg-red-100 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-200 dark:hover:bg-red-950/40"
+              >
+                退出审阅模式
+              </button>
+              <div className="flex shrink-0 flex-wrap items-center gap-2 text-sm">
+                <button
+                  type="button"
+                  disabled={pageNumber <= 1 || !pdfDoc}
+                  className="rounded-lg border border-neutral-300 px-2.5 py-1.5 leading-none transition hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-900"
+                  onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+                >
+                  上一页
+                </button>
+                <button
+                  type="button"
+                  disabled={pageNumber >= numPages || !pdfDoc}
+                  className="rounded-lg border border-neutral-300 px-2.5 py-1.5 leading-none transition hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-900"
+                  onClick={() => setPageNumber((p) => Math.min(numPages || p, p + 1))}
+                >
+                  下一页
+                </button>
+                <span className="rounded-lg bg-neutral-100 px-2.5 py-1.5 tabular-nums text-neutral-600 dark:bg-neutral-900 dark:text-neutral-300">
+                  第 {pageNumber} / {numPages || "—"} 页
+                </span>
+              </div>
+              <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs sm:text-sm">
+                {batchReviewProgress && (
+                  <span className="text-neutral-600 dark:text-neutral-400">
+                    审稿中 {batchReviewProgress.currentRangeLabel}（{batchReviewProgress.done}/{batchReviewProgress.total}）
+                  </span>
+                )}
+                {notice && (
+                  <span
+                    className={
+                      notice.variant === "success"
+                        ? "text-emerald-700 dark:text-emerald-400"
+                        : "text-amber-700 dark:text-amber-300"
+                    }
+                  >
+                    {notice.text}
+                  </span>
+                )}
+                {error && <span className="text-red-600 dark:text-red-400">{error}</span>}
+              </div>
+            </div>
+          )}
+
+          <div
+            className={`flex min-h-0 flex-1 flex-col lg:flex-row ${
+              isReviewViewMode ? "gap-2 lg:items-stretch" : "gap-4 lg:items-start"
+            }`}
+          >
           {/* SVG connector lines */}
           {activeConnectorLine && (
             <svg className="pointer-events-none absolute inset-0 z-10 h-full w-full overflow-visible">
@@ -1762,7 +1848,12 @@ export default function PdfReviewer() {
             </div>
           )}
 
-          <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)]">
+          <div
+            className={`grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)] ${
+              isReviewViewMode ? "lg:items-stretch" : ""
+            }`}
+          >
+          {!isReviewViewMode && (
           <div className="rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-1 lg:row-start-1 lg:flex lg:h-full lg:min-h-[66px] lg:items-center">
             <div className="flex w-full items-center justify-between gap-3">
               <div>
@@ -1780,9 +1871,20 @@ export default function PdfReviewer() {
               </button>
             </div>
           </div>
+          )}
 
-          <aside className="min-h-0 lg:col-start-1 lg:row-start-2 lg:sticky lg:top-4 lg:z-10 lg:self-start">
-            <div className="panel-scrollbar flex min-h-0 flex-col gap-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
+          <aside
+            className={`min-h-0 lg:col-start-1 lg:z-10 lg:self-start ${
+              isReviewViewMode ? "lg:row-start-1 lg:sticky lg:top-0" : "lg:row-start-2 lg:sticky lg:top-4"
+            }`}
+          >
+            <div
+              className={`panel-scrollbar flex min-h-0 flex-col gap-4 lg:overflow-y-auto lg:overscroll-contain lg:pr-2 ${
+                isReviewViewMode
+                  ? "lg:max-h-[calc(100dvh-5.5rem)]"
+                  : "lg:max-h-[calc(100vh-2rem)]"
+              }`}
+            >
                 <section className="relative flex min-h-[232px] shrink-0 flex-col overflow-hidden rounded-3xl border border-amber-200 bg-[radial-gradient(circle_at_top_left,_rgba(253,230,138,0.35),_transparent_38%),linear-gradient(180deg,rgba(255,251,235,0.98),rgba(254,249,195,0.96))] p-4 shadow-sm dark:border-amber-900 dark:bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.12),_transparent_38%),linear-gradient(180deg,rgba(41,30,9,0.98),rgba(24,24,27,0.98))] lg:h-auto lg:min-h-0 lg:max-h-none lg:shrink-0">
                 <div className="pointer-events-none absolute -right-8 top-0 h-24 w-24 rounded-full bg-amber-200/50 blur-3xl dark:bg-amber-400/10" />
                 <div className="relative flex min-h-0 flex-col">
@@ -1931,6 +2033,7 @@ export default function PdfReviewer() {
             </div>
           </aside>
 
+          {!isReviewViewMode && (
           <div className="flex min-h-0 items-center justify-start rounded-2xl border border-neutral-200 bg-white px-4 py-2.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-1">
             <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-x-3 gap-y-2 text-sm">
               <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -2027,11 +2130,16 @@ export default function PdfReviewer() {
               </div>
             </div>
           </div>
+          )}
 
           {/* PDF canvas + overlays */}
           <div
             ref={pdfViewportRef}
-            className="relative h-full min-h-0 overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 lg:row-start-2"
+            className={`relative min-h-0 overflow-auto rounded-2xl border border-neutral-200 bg-neutral-100 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950 lg:col-start-2 ${
+              isReviewViewMode
+                ? "h-full min-h-[min(480px,calc(100dvh-5.5rem))] lg:row-start-1"
+                : "h-full lg:row-start-2"
+            }`}
           >
             {!docLoading && !docError && pdfDoc && (
               <>
@@ -2085,6 +2193,38 @@ export default function PdfReviewer() {
                 >
                   <circle cx="11" cy="11" r="8" />
                   <path d="m21 21-4.3-4.3" />
+                </svg>
+              </button>
+            )}
+
+            {pdfDoc && (
+              <button
+                type="button"
+                onClick={() => setIsReviewViewMode((on) => !on)}
+                className={`absolute right-4 top-[3.75rem] z-20 flex h-10 w-10 items-center justify-center rounded-xl border bg-white shadow-sm transition-all hover:bg-neutral-50 active:scale-95 dark:border-neutral-800 dark:bg-neutral-900 dark:hover:bg-neutral-800 ${
+                  isReviewViewMode
+                    ? "border-neutral-400 bg-neutral-100 ring-2 ring-neutral-200 dark:border-neutral-600 dark:bg-neutral-800 dark:ring-neutral-700"
+                    : "border-neutral-200"
+                }`}
+                title={isReviewViewMode ? "退出审阅模式（Esc）" : "审阅模式：隐藏顶栏，专注阅读与批注"}
+                aria-label={isReviewViewMode ? "退出审阅模式" : "进入审阅模式"}
+                aria-pressed={isReviewViewMode}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                  className="text-neutral-600 dark:text-neutral-400"
+                >
+                  <path d="M12 6.8c-2.6-1.6-5.2-1.6-7.8 0v10.9c2.6-1.4 5.2-1.4 7.8 0 2.6-1.4 5.2-1.4 7.8 0V6.8c-2.6-1.6-5.2-1.6-7.8 0Z" />
+                  <path d="M12 6.8v10.9" />
                 </svg>
               </button>
             )}
@@ -2310,7 +2450,11 @@ export default function PdfReviewer() {
           </div>
 
           {/* Sidebar */}
-          <aside className="w-full shrink-0 lg:sticky lg:top-4 lg:w-[360px] xl:w-[420px]">
+          <aside
+            className={`w-full shrink-0 lg:w-[360px] xl:w-[420px] ${
+              isReviewViewMode ? "lg:sticky lg:top-0 lg:self-stretch" : "lg:sticky lg:top-4"
+            }`}
+          >
             <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2359,7 +2503,11 @@ export default function PdfReviewer() {
 
               <div
                 ref={annotationPanelRef}
-                className="mt-4 max-h-[calc(100vh-11rem)] overflow-y-auto pr-1"
+                className={`mt-4 overflow-y-auto pr-1 ${
+                  isReviewViewMode
+                    ? "max-h-[calc(100dvh-8rem)] lg:max-h-[calc(100dvh-5.5rem)]"
+                    : "max-h-[calc(100vh-11rem)]"
+                }`}
               >
                 {annotationFeed.length === 0 && !creatingSelectionAnnotation ? (
                   <p className="rounded-xl border border-dashed border-neutral-200 bg-neutral-50 px-4 py-6 text-sm text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400">
@@ -2567,6 +2715,7 @@ export default function PdfReviewer() {
               </div>
             </div>
           </aside>
+          </div>
         </div>
       )}
 
