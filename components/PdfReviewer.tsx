@@ -30,6 +30,23 @@ import { copyTextToClipboard } from "@/lib/copy-text";
 
 /** 豆包「审稿提示」临时覆盖稿，仅当前浏览器标签有效，关闭标签后失效 */
 const DOUBAO_SPEC_SESSION_KEY = "pdf-reviewer:doubao-editor-spec-override";
+/** AI 审稿时使用的编辑规范临时覆盖稿，仅本次审稿期间有效，刷新后失效 */
+const AI_REVIEW_SPEC_SESSION_KEY = "pdf-reviewer:ai-review-editor-spec-override";
+/** 标注 PDF 导出（暂隐藏 UI，恢复时改为 true） */
+const PDF_EXPORT_ENABLED = false;
+
+function getAiReviewEditorSpecOverride(): string | undefined {
+  try {
+    const stored = sessionStorage.getItem(AI_REVIEW_SPEC_SESSION_KEY);
+    if (stored !== null && stored.trim() !== "") {
+      return stored.trim();
+    }
+  } catch {
+    // 忽略存储访问错误
+  }
+  return undefined;
+}
+
 import {
   annotateTextLayerCharRanges,
   computeDomHighlightRects,
@@ -205,6 +222,9 @@ export default function PdfReviewer() {
   const [doubaoCopyHint, setDoubaoCopyHint] = useState(false);
   const [doubaoSpecModalOpen, setDoubaoSpecModalOpen] = useState(false);
   const [doubaoSpecDraft, setDoubaoSpecDraft] = useState("");
+  /** AI 审稿编辑规范编辑弹窗状态 */
+  const [aiReviewSpecModalOpen, setAiReviewSpecModalOpen] = useState(false);
+  const [aiReviewSpecDraft, setAiReviewSpecDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
   const [dragOverTarget, setDragOverTarget] = useState<'bing' | 'speech' | 'doubao' | null>(null);
   const [isDraggingSelection, setIsDraggingSelection] = useState(false);
@@ -851,6 +871,7 @@ export default function PdfReviewer() {
           excerpt: pending.excerpt,
           pageText: formattedText.slice(0, 48000),
           model: aiModelId,
+          editorSpec: getAiReviewEditorSpecOverride(),
         }),
       });
       const data = await res.json();
@@ -984,6 +1005,68 @@ export default function PdfReviewer() {
     }
   }, []);
 
+  /* --- AI review spec editing ------------------------------------- */
+  const openAiReviewSpecModal = useCallback(async () => {
+    setError(null);
+    try {
+      let initial = "";
+      const stored =
+        typeof window !== "undefined"
+          ? sessionStorage.getItem(AI_REVIEW_SPEC_SESSION_KEY)
+          : null;
+      if (stored !== null) {
+        initial = stored;
+      } else {
+        if (editorSpecCacheRef.current === null) {
+          const res = await fetch("/api/editor-spec");
+          if (!res.ok) throw new Error("无法加载审稿规范");
+          const data = (await res.json()) as { spec?: string };
+          if (typeof data.spec !== "string" || !data.spec.trim()) {
+            throw new Error("审稿规范内容为空");
+          }
+          editorSpecCacheRef.current = data.spec;
+        }
+        initial = editorSpecCacheRef.current ?? "";
+      }
+      setAiReviewSpecDraft(initial);
+      setAiReviewSpecModalOpen(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加载审稿规范失败");
+    }
+  }, []);
+
+  const saveAiReviewSpecOverride = useCallback(() => {
+    const t = aiReviewSpecDraft.trim();
+    try {
+      if (t === "") {
+        sessionStorage.removeItem(AI_REVIEW_SPEC_SESSION_KEY);
+      } else {
+        sessionStorage.setItem(AI_REVIEW_SPEC_SESSION_KEY, t);
+      }
+      setAiReviewSpecModalOpen(false);
+    } catch {
+      setError("无法写入浏览器缓存（请检查是否禁用本地存储）");
+    }
+  }, [aiReviewSpecDraft]);
+
+  const restoreAiReviewSpecDefault = useCallback(async () => {
+    setError(null);
+    try {
+      sessionStorage.removeItem(AI_REVIEW_SPEC_SESSION_KEY);
+      editorSpecCacheRef.current = null;
+      const res = await fetch("/api/editor-spec");
+      if (!res.ok) throw new Error("无法加载审稿规范");
+      const data = (await res.json()) as { spec?: string };
+      if (typeof data.spec !== "string" || !data.spec.trim()) {
+        throw new Error("审稿规范内容为空");
+      }
+      editorSpecCacheRef.current = data.spec;
+      setAiReviewSpecDraft(data.spec);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "恢复默认失败");
+    }
+  }, []);
+
   /**
    * 先复制到剪贴板再打开豆包（不依赖对方 URL 参数；跨域无法代填输入框，粘贴最可靠）。
    * 选择「加提示」时拼接 editor-spec（含 session 临时稿）与文本框内容。
@@ -1045,6 +1128,7 @@ export default function PdfReviewer() {
         };
       }),
     );
+
     const body = JSON.stringify({
       pages: pagePayload.map((page) => ({
         pageIndex: page.pageNumber - 1,
@@ -1053,6 +1137,7 @@ export default function PdfReviewer() {
       mode,
       checkPunctuation: punctuationReviewMode === "check",
       model: aiModelId,
+      editorSpec: getAiReviewEditorSpecOverride(),
     });
 
     const REVIEW_PAGE_ATTEMPTS = 3;
@@ -1370,17 +1455,16 @@ export default function PdfReviewer() {
     <div className="mx-auto flex min-h-0 w-full max-w-[1480px] flex-1 flex-col gap-5 px-4 pb-8 pt-2">
       {/* Header */}
       <header className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950">
-        <div className="flex flex-col gap-1">
+        <div>
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950 dark:text-neutral-50">AI 审稿</h1>
-          <p className="text-sm leading-6 text-neutral-600 dark:text-neutral-400">
-            上传 PDF，可从当前页起审稿 1、5、10、20、30 页；连续审稿时会把多页合并发给 AI，超过 5 页则按每 5 页分批处理。
+          <p className="mt-1 text-sm tracking-wide text-neutral-500 dark:text-neutral-400">
+            智能审读，精准标注，助力专业编校。
           </p>
         </div>
 
-        <div className="mt-4 grid gap-3 lg:grid-cols-[auto_1fr_auto]">
-          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-neutral-900">
-            <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-neutral-500 dark:text-neutral-400">文件</div>
-            <label className="inline-flex cursor-pointer items-center rounded-xl bg-neutral-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-950 dark:hover:bg-white">
+        <div className="mt-4 rounded-2xl border border-neutral-200/80 bg-neutral-50/60 p-3 dark:border-neutral-800 dark:bg-neutral-900/40">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <label className="inline-flex h-10 shrink-0 cursor-pointer items-center rounded-lg bg-neutral-950 px-4 text-sm font-medium text-white transition hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-950 dark:hover:bg-white">
               选择 PDF
               <input
                 type="file"
@@ -1389,92 +1473,106 @@ export default function PdfReviewer() {
                 onChange={(e) => void onFile(e.target.files?.[0] ?? null)}
               />
             </label>
-          </div>
 
-          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-neutral-900">
-            <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-neutral-500 dark:text-neutral-400">审稿</div>
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                disabled={aiBusy || !pdfDoc}
-                onClick={() => void runAiReview()}
-                className="min-w-[8.5rem] rounded-xl bg-orange-500 px-6 py-3 text-sm font-medium text-white transition hover:bg-orange-600 disabled:opacity-50"
-              >
-                {batchReviewProgress
-                  ? `审稿中… ${batchReviewProgress.done}/${batchReviewProgress.total}`
-                  : "AI审稿"}
-              </button>
-              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>审稿页数</span>
-                <select
-                  value={batchReviewCount}
-                  disabled={aiBusy || !pdfDoc}
-                  onChange={(e) => setBatchReviewCount(Number(e.target.value))}
-                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
-                >
-                  {REVIEW_PAGE_COUNT_OPTIONS.map((count) => (
-                    <option key={count} value={count}>
-                      {count} 页
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>审稿模式</span>
-                <select
-                  value={reviewMode}
-                  disabled={aiBusy || !pdfDoc}
-                  onChange={(e) => setReviewMode(e.target.value as ReviewMode)}
-                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
-                >
-                  <option value="precise">精确查找</option>
-                  <option value="discover-more">发现更多</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>检查排版/符号</span>
-                <select
-                  value={punctuationReviewMode}
-                  disabled={aiBusy || !pdfDoc}
-                  onChange={(e) =>
-                    setPunctuationReviewMode(e.target.value as PunctuationReviewMode)
-                  }
-                  className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
-                >
-                  <option value="check">是</option>
-                  <option value="ignore">否</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-400">
-                <span>选择模型</span>
-                <select
-                  value={aiModelId}
-                  disabled={aiBusy || !pdfDoc}
-                  onChange={(e) => setAiModelId(e.target.value)}
-                  className="max-w-[min(100vw-6rem,18rem)] rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
-                  title="MiniMax 需 MINIMAX_API_KEY；方舟需 ARK_API_KEY；列表见 lib/ai-review-models.ts"
-                >
-                  {AI_REVIEW_MODELS.map((m, i) => (
-                    <option key={`ai-opt-${i}-${m.id}`} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
+            <div
+              className="hidden h-6 w-px shrink-0 bg-neutral-200 sm:block dark:bg-neutral-700"
+              aria-hidden
+            />
 
-          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-neutral-900">
-            <div className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-neutral-500 dark:text-neutral-400">导出</div>
             <button
               type="button"
-              disabled={exporting || !hasAnyAnnotations}
-              onClick={() => void downloadPdf()}
-              className="rounded-xl border border-neutral-300 bg-white px-4 py-3 text-sm font-medium text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:bg-neutral-900 disabled:opacity-50"
+              disabled={aiBusy || !pdfDoc}
+              onClick={() => void runAiReview()}
+              className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-orange-500 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-orange-600 disabled:opacity-50"
             >
-              {exporting ? "导出中…" : "下载标注 PDF"}
+              {batchReviewProgress
+                ? `审稿中… ${batchReviewProgress.done}/${batchReviewProgress.total}`
+                : "AI 审稿"}
+            </button>
+
+            <label className="flex h-10 shrink-0 items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2 shadow-sm dark:border-neutral-700 dark:bg-neutral-950">
+              <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">模型</span>
+              <select
+                value={aiModelId}
+                disabled={aiBusy || !pdfDoc}
+                onChange={(e) => setAiModelId(e.target.value)}
+                className="h-full w-[5.75rem] border-0 bg-transparent py-0 pl-0 pr-4 text-sm text-neutral-900 focus:outline-none focus:ring-0 disabled:opacity-50 dark:text-neutral-100"
+                title="MiniMax 需 MINIMAX_API_KEY；方舟需 ARK_API_KEY；列表见 lib/ai-review-models.ts"
+              >
+                {AI_REVIEW_MODELS.map((m, i) => (
+                  <option key={`ai-opt-${i}-${m.id}`} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex h-10 items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2.5 shadow-sm dark:border-neutral-700 dark:bg-neutral-950">
+              <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">页数</span>
+              <select
+                value={batchReviewCount}
+                disabled={aiBusy || !pdfDoc}
+                onChange={(e) => setBatchReviewCount(Number(e.target.value))}
+                className="h-full min-w-0 border-0 bg-transparent py-0 pr-6 text-sm text-neutral-900 focus:outline-none focus:ring-0 disabled:opacity-50 dark:text-neutral-100"
+              >
+                {REVIEW_PAGE_COUNT_OPTIONS.map((count) => (
+                  <option key={count} value={count}>
+                    {count} 页
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex h-10 items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2.5 shadow-sm dark:border-neutral-700 dark:bg-neutral-950">
+              <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">模式</span>
+              <select
+                value={reviewMode}
+                disabled={aiBusy || !pdfDoc}
+                onChange={(e) => setReviewMode(e.target.value as ReviewMode)}
+                className="h-full min-w-0 border-0 bg-transparent py-0 pr-6 text-sm text-neutral-900 focus:outline-none focus:ring-0 disabled:opacity-50 dark:text-neutral-100"
+              >
+                <option value="precise">精确查找</option>
+                <option value="discover-more">发现更多</option>
+              </select>
+            </label>
+
+            <label className="flex h-10 items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2.5 shadow-sm dark:border-neutral-700 dark:bg-neutral-950">
+              <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">检查排版/符号</span>
+              <select
+                value={punctuationReviewMode}
+                disabled={aiBusy || !pdfDoc}
+                onChange={(e) =>
+                  setPunctuationReviewMode(e.target.value as PunctuationReviewMode)
+                }
+                className="h-full min-w-0 border-0 bg-transparent py-0 pr-6 text-sm text-neutral-900 focus:outline-none focus:ring-0 disabled:opacity-50 dark:text-neutral-100"
+              >
+                <option value="check">是</option>
+                <option value="ignore">否</option>
+              </select>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => void openAiReviewSpecModal()}
+              className="inline-flex h-10 shrink-0 items-center rounded-lg border border-orange-200 bg-orange-50 px-3 text-sm font-medium text-orange-800 shadow-sm transition hover:border-orange-300 hover:bg-orange-100 dark:border-orange-800/60 dark:bg-orange-950/30 dark:text-orange-200 dark:hover:bg-orange-900/40"
+              title="修改审稿规则，仅本次审稿期间有效"
+            >
+              修改审稿规则
             </button>
           </div>
+
+          {PDF_EXPORT_ENABLED && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-neutral-200/80 pt-3 dark:border-neutral-800">
+              <button
+                type="button"
+                disabled={exporting || !hasAnyAnnotations}
+                onClick={() => void downloadPdf()}
+                className="inline-flex h-10 items-center rounded-lg border border-neutral-200 bg-white px-4 text-sm font-medium text-neutral-700 shadow-sm transition hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200 dark:hover:bg-neutral-900"
+              >
+                {exporting ? "导出中…" : "下载标注 PDF"}
+              </button>
+            </div>
+          )}
         </div>
 
         {batchReviewProgress && (
@@ -1602,6 +1700,60 @@ export default function PdfReviewer() {
                     type="button"
                     onClick={saveDoubaoSpecOverride}
                     className="rounded-xl bg-violet-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-violet-700"
+                  >
+                    保存
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {aiReviewSpecModalOpen && (
+            <div className="fixed inset-0 z-[41] flex items-center justify-center bg-black/40 px-4">
+              <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-3xl border border-neutral-200 bg-white shadow-2xl dark:border-neutral-800 dark:bg-neutral-950">
+                <div className="flex shrink-0 items-start justify-between gap-4 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800">
+                  <div>
+                    <h2 className="text-lg font-semibold text-neutral-950 dark:text-neutral-50">修改审稿规则</h2>
+                    <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                      仅本次审稿期间有效，刷新页面后失效。批量 AI 审稿与选区「AI专审」均将使用修改后的规则。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAiReviewSpecModalOpen(false)}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-600 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    关闭
+                  </button>
+                </div>
+                <textarea
+                  value={aiReviewSpecDraft}
+                  onChange={(e) => setAiReviewSpecDraft(e.target.value)}
+                  className="min-h-[min(50vh,320px)] flex-1 resize-y border-0 bg-white px-5 py-3 text-sm leading-relaxed text-neutral-900 outline-none dark:bg-neutral-950 dark:text-neutral-100"
+                  placeholder="审稿规则全文…"
+                  spellCheck={false}
+                />
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-neutral-200 px-5 py-3 dark:border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => void restoreAiReviewSpecDefault()}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    恢复默认
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAiReviewSpecModalOpen(false);
+                    }}
+                    className="rounded-xl border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 transition hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveAiReviewSpecOverride}
+                    className="rounded-xl bg-orange-500 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-orange-600"
                   >
                     保存
                   </button>

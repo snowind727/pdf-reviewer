@@ -30,6 +30,8 @@ const bodySchema = z.object({
   checkPunctuation: z.boolean().optional(),
   /** 统一模型，见 lib/ai-review-models.ts */
   model: z.enum(AI_REVIEW_MODEL_ZOD_ENUM).optional(),
+  /** 编辑规范临时覆盖稿，仅本次审稿期间有效 */
+  editorSpec: z.string().optional(),
 }).superRefine((data, ctx) => {
   if (Array.isArray(data.pages) && data.pages.length > 0) {
     const seen = new Set<number>();
@@ -153,8 +155,9 @@ function buildPunctuationInstructions(checkPunctuation: boolean): string {
 - 只有当这类问题已经明显影响语义理解、事实表达或版面内容正确性时，才可少量返回，并在 reason 中明确说明影响`;
 }
 
-function buildSystemPrompt(mode: ReviewMode, checkPunctuation: boolean): string {
-  return `${EDITOR_PUBLISHING_SPEC}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}${buildPunctuationInstructions(checkPunctuation)}`;
+function buildSystemPrompt(mode: ReviewMode, checkPunctuation: boolean, editorSpecOverride?: string): string {
+  const spec = editorSpecOverride?.trim() || EDITOR_PUBLISHING_SPEC;
+  return `${spec}\n${TASK_INSTRUCTIONS.trim()}${REVIEW_MODE_CONFIG[mode].extraInstructions}${buildPunctuationInstructions(checkPunctuation)}`;
 }
 
 type ReviewPageInput = z.infer<typeof reviewPageInputSchema>;
@@ -452,7 +455,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const { mode = "precise", checkPunctuation = false, model: modelParam } = parsed.data;
+  const { mode = "precise", checkPunctuation = false, model: modelParam, editorSpec: editorSpecOverride } = parsed.data;
   const pages =
     parsed.data.pages && parsed.data.pages.length > 0
       ? parsed.data.pages
@@ -462,7 +465,7 @@ export async function POST(req: Request) {
   const minimaxModel = provider === "minimax" ? modelId : undefined;
   const arkModel = provider === "doubao" ? modelId : undefined;
 
-  const systemPrompt = buildSystemPrompt(mode, checkPunctuation);
+  const systemPrompt = buildSystemPrompt(mode, checkPunctuation, editorSpecOverride);
   const temperature = REVIEW_MODE_CONFIG[mode].temperature;
   const userContent = buildUserContent(pages);
   const reviewablePages = pages.filter((page) => page.text.trim());

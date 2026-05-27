@@ -21,6 +21,8 @@ const bodySchema = z.object({
   excerpt: z.string().min(1).max(500),
   pageText: z.string().min(1).max(50000),
   model: z.enum(AI_REVIEW_MODEL_ZOD_ENUM).optional(),
+  /** 编辑规范临时覆盖稿，仅本次审稿期间有效 */
+  editorSpec: z.string().optional(),
 });
 
 const suggestSchema = z.object({
@@ -30,11 +32,7 @@ const suggestSchema = z.object({
   kind: z.string().optional(),
 });
 
-const SYSTEM = `${EDITOR_PUBLISHING_SPEC}
-
----
-
-当前任务：用户会给你当前页全文，以及编辑手动框选的一段摘录。请只针对这段摘录给出一条最可执行的修改建议。
+const SUGGEST_TASK_INSTRUCTIONS = `当前任务：用户会给你当前页全文，以及编辑手动框选的一段摘录。请只针对这段摘录给出一条最可执行的修改建议。
 
 要求：
 - 只聚焦该摘录，不要输出整页多条问题
@@ -51,7 +49,12 @@ const SYSTEM = `${EDITOR_PUBLISHING_SPEC}
 - 不要输出 Markdown，不要代码围栏
 
 返回 JSON：
-{"excerpt":"有问题的最短原文子串","suggestion":"改为：xxx","reason":"一句话原因","kind":"error 或 suspected"}`.trim();
+{"excerpt":"有问题的最短原文子串","suggestion":"改为：xxx","reason":"一句话原因","kind":"error 或 suspected"}`;
+
+function buildSystemPrompt(editorSpecOverride?: string): string {
+  const spec = editorSpecOverride?.trim() || EDITOR_PUBLISHING_SPEC;
+  return `${spec}\n\n---\n\n${SUGGEST_TASK_INSTRUCTIONS.trim()}`;
+}
 
 type AnthropicContentBlock =
   | { type: "text"; text: string }
@@ -178,17 +181,18 @@ export async function POST(req: Request) {
     );
   }
 
-  const { excerpt, pageText, model: modelParam } = parsed.data;
+  const { excerpt, pageText, model: modelParam, editorSpec: editorSpecOverride } = parsed.data;
   const modelId = modelParam ?? DEFAULT_AI_REVIEW_MODEL_ID;
   const provider = getAiReviewProvider(modelId);
   const minimaxModel = provider === "minimax" ? modelId : undefined;
   const arkModel = provider === "doubao" ? modelId : undefined;
+  const systemPrompt = buildSystemPrompt(editorSpecOverride);
   const userContent = `--- 当前摘录 ---\n${excerpt}\n\n--- 页面文本 ---\n${pageText}`;
 
   if (provider === "doubao") {
     try {
       const ark = await arkChatCompletion({
-        system: SYSTEM,
+        system: systemPrompt,
         user: userContent,
         maxTokens: 1200,
         temperature: 0.2,
@@ -294,7 +298,7 @@ export async function POST(req: Request) {
     model,
     max_tokens: 1200,
     temperature: 0.2,
-    system: SYSTEM,
+    system: systemPrompt,
     messages: [
       {
         role: "user",
@@ -312,7 +316,7 @@ export async function POST(req: Request) {
     console.log("[suggest-edit] API Key (前6/后4):", apiKey.slice(0, 6) + "…" + apiKey.slice(-4));
     console.log("[suggest-edit] Request body 总长:", bodyStr.length, "字符");
     console.log("[suggest-edit] ---------- System Prompt ----------");
-    console.log(SYSTEM);
+    console.log(systemPrompt);
     console.log("[suggest-edit] ---------- User Message ----------");
     console.log(userContent);
     console.log("[suggest-edit] ---------- 提示词结束 ----------");
