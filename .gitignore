@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # pdf.js 由 postinstall 从 pdfjs-dist 复制，体积大、勿提交
 public/pdfjs/*.mjs
