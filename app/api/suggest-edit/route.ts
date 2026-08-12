@@ -14,6 +14,7 @@ import {
   resolveMinimaxAnthropicModelId,
 } from "@/lib/minimax-models";
 import { arkChatCompletion } from "@/lib/volcengine-ark";
+import { deepseekChatCompletion } from "@/lib/deepseek";
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
 
@@ -165,7 +166,8 @@ function canonicalizeExcerpt(source: string, excerpt: string): string | null {
   return findUniqueLooseMatch(source, needle);
 }
 
-export async function POST(req: Request) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function legacyPost(req: Request) {
   let json: unknown;
   try {
     json = await req.json();
@@ -440,6 +442,82 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: message },
       { status: isTimeout ? 504 : 500 },
+    );
+  }
+}
+
+/** 当前生产调用：DeepSeek OpenAI 兼容 Chat Completions。 */
+export async function POST(req: Request) {
+  let json: unknown;
+  try {
+    json = await req.json();
+  } catch {
+    return NextResponse.json({ error: "无效 JSON" }, { status: 400 });
+  }
+
+  const parsed = bodySchema.safeParse(json);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "参数无效", details: parsed.error.flatten() },
+      { status: 400 },
+    );
+  }
+
+  const { excerpt, pageText, editorSpec: editorSpecOverride } = parsed.data;
+  const systemPrompt = buildSystemPrompt(editorSpecOverride);
+  const userContent = `--- 当前摘录 ---\n${excerpt}\n\n--- 页面文本 ---\n${pageText}`;
+  const result = await deepseekChatCompletion({
+    system: systemPrompt,
+    user: userContent,
+    maxTokens: 1200,
+    temperature: 0.2,
+    timeoutMs: 120_000,
+    logPrefix: "[suggest-edit]",
+  });
+
+  if (!result.ok) {
+    const status = result.status === 503 ? 503 : result.status === 504 ? 504 : 502;
+    return NextResponse.json(
+      {
+        error: result.status === 503 ? result.detail : "模型接口错误",
+        status: result.status,
+        detail: result.status === 503 ? undefined : result.detail,
+        requestId: result.requestId,
+      },
+      { status },
+    );
+  }
+
+  try {
+    const resultJson = suggestSchema.parse(parseSuggestionJson(result.text.trim()));
+    const canonicalExcerpt =
+      (typeof resultJson.excerpt === "string" &&
+        canonicalizeExcerpt(excerpt, resultJson.excerpt)) ||
+      excerpt.trim();
+    const kind = normalizeIssueKind({
+      excerpt: canonicalExcerpt,
+      reason: resultJson.reason ?? "",
+      suggestion: resultJson.suggestion,
+      severity: resultJson.kind,
+    });
+
+    return NextResponse.json({
+      excerpt: canonicalExcerpt,
+      suggestion: resultJson.suggestion.trim(),
+      reason: resultJson.reason?.trim() ?? "",
+      kind,
+    });
+  } catch (e) {
+    const isZod = e instanceof z.ZodError;
+    const message = isZod
+      ? `AI 返回结构不符合预期：${e.issues.map((x) => x.message).join("；")}`
+      : e instanceof Error
+        ? e.message
+        : String(e);
+    console.log("[suggest-edit] DeepSeek JSON 解析失败:", message);
+    return NextResponse.json(
+      { error: message },
+      { status: 502 },
     );
   }
 }

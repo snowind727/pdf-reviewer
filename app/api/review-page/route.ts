@@ -13,7 +13,8 @@ import {
 } from "@/lib/minimax-models";
 import { arkChatCompletion } from "@/lib/volcengine-ark";
 import { EDITOR_PUBLISHING_SPEC } from "@/lib/editor-spec";
-/** 含 529：部分上游在负载高时返回 529，与 MiniMax overloaded 类错误 */
+import { deepseekChatCompletion } from "@/lib/deepseek";
+/** 旧版 MiniMax / 方舟调用代码保留在文件末尾作为迁移参考，当前 POST 不再调用。 */
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
 const RETRYABLE_ERROR_CODES = new Set(["1000", "1001", "1002", "1024", "1033"]);
 const reviewModeSchema = z.enum(["precise", "discover-more"]);
@@ -28,7 +29,7 @@ const bodySchema = z.object({
   pages: z.array(reviewPageInputSchema).min(1).max(5).optional(),
   mode: reviewModeSchema.optional(),
   checkPunctuation: z.boolean().optional(),
-  /** 统一模型，见 lib/ai-review-models.ts */
+  /** 兼容旧版请求；当前接口固定使用 DeepSeek V4 Flash */
   model: z.enum(AI_REVIEW_MODEL_ZOD_ENUM).optional(),
   /** 编辑规范临时覆盖稿，仅本次审稿期间有效 */
   editorSpec: z.string().optional(),
@@ -439,7 +440,8 @@ function isRetryableFailure(
   return RETRYABLE_STATUS.has(status) || (errorCode ? RETRYABLE_ERROR_CODES.has(errorCode) : false);
 }
 
-export async function POST(req: Request) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function legacyPost(req: Request) {
   let json: unknown;
   try {
     json = await req.json();
@@ -734,6 +736,87 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: message },
       { status: isTimeout ? 504 : 500 },
+    );
+  }
+}
+
+/**
+ * 当前生产调用：DeepSeek OpenAI 兼容 Chat Completions。
+ * 旧版 MiniMax / 方舟逻辑仅保留在 legacyPost 中，不再作为路由入口。
+ */
+export async function POST(req: Request) {
+  let json: unknown;
+  try {
+    json = await req.json();
+  } catch {
+    return NextResponse.json({ error: "无效 JSON" }, { status: 400 });
+  }
+
+  const parsed = bodySchema.safeParse(json);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "参数无效", details: parsed.error.flatten() },
+      { status: 400 },
+    );
+  }
+
+  const {
+    mode = "precise",
+    checkPunctuation = false,
+    editorSpec: editorSpecOverride,
+  } = parsed.data;
+  const pages =
+    parsed.data.pages && parsed.data.pages.length > 0
+      ? parsed.data.pages
+      : [{ pageIndex: parsed.data.pageIndex!, text: parsed.data.text! }];
+  const systemPrompt = buildSystemPrompt(mode, checkPunctuation, editorSpecOverride);
+  const userContent = buildUserContent(pages);
+  const reviewablePages = pages.filter((page) => page.text.trim());
+
+  if (reviewablePages.length === 0) {
+    return NextResponse.json(
+      {
+        issues: [],
+        notice: "所选页面均无可用文本层，无法精确定位；可更换为可复制文本的 PDF。",
+      },
+      { status: 200 },
+    );
+  }
+
+  const result = await deepseekChatCompletion({
+    system: systemPrompt,
+    user: userContent,
+    maxTokens: 8192,
+    temperature: REVIEW_MODE_CONFIG[mode].temperature,
+    timeoutMs: 120_000,
+    logPrefix: "[review-page]",
+  });
+
+  if (!result.ok) {
+    const status = result.status === 503 ? 503 : result.status === 504 ? 504 : 502;
+    return NextResponse.json(
+      {
+        error: result.status === 503 ? result.detail : "模型接口错误",
+        status: result.status,
+        detail: result.status === 503 ? undefined : result.detail,
+        requestId: result.requestId,
+      },
+      { status },
+    );
+  }
+
+  try {
+    return NextResponse.json(
+      normalizeReviewResult(reviewablePages, result.text, checkPunctuation),
+    );
+  } catch (e) {
+    console.log(
+      "[review-page] DeepSeek JSON 解析失败:",
+      e instanceof Error ? e.message : e,
+    );
+    return NextResponse.json(
+      { error: "模型返回的 JSON 无法解析", raw: result.text.slice(0, 800) },
+      { status: 502 },
     );
   }
 }

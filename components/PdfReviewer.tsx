@@ -21,10 +21,6 @@ import {
   charRangeToPdfBoxes,
   resolveIssueCharRange,
 } from "@/lib/pdf-text-match";
-import {
-  AI_REVIEW_MODELS,
-  DEFAULT_AI_REVIEW_MODEL_ID,
-} from "@/lib/ai-review-models";
 import type { Annotation, IssueKind, NormalizedReviewIssue } from "@/lib/review-types";
 import { copyTextToClipboard } from "@/lib/copy-text";
 
@@ -172,7 +168,6 @@ export default function PdfReviewer() {
   const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
   const [punctuationReviewMode, setPunctuationReviewMode] =
     useState<PunctuationReviewMode>("ignore");
-  const [aiModelId, setAiModelId] = useState(DEFAULT_AI_REVIEW_MODEL_ID);
   const [batchReviewCount, setBatchReviewCount] = useState(10);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
@@ -885,7 +880,6 @@ export default function PdfReviewer() {
         body: JSON.stringify({
           excerpt: pending.excerpt,
           pageText: formattedText.slice(0, 48000),
-          model: aiModelId,
           editorSpec: getAiReviewEditorSpecOverride(),
         }),
       });
@@ -932,7 +926,7 @@ export default function PdfReviewer() {
     } finally {
       setCreatingSelectionAnnotation(null);
     }
-  }, [aiModelId, loadPageText, pageNumber, selectionPopup]);
+  }, [loadPageText, pageNumber, selectionPopup]);
 
   const copySelectionText = useCallback(async () => {
     if (!selectionPopup?.text) return;
@@ -1151,7 +1145,6 @@ export default function PdfReviewer() {
       })),
       mode,
       checkPunctuation: punctuationReviewMode === "check",
-      model: aiModelId,
       editorSpec: getAiReviewEditorSpecOverride(),
     });
 
@@ -1244,7 +1237,7 @@ export default function PdfReviewer() {
     }
 
     throw new Error("AI审稿异常，请稍后再试");
-  }, [aiModelId, loadPageText, punctuationReviewMode]);
+  }, [loadPageText, punctuationReviewMode]);
 
   const runAiReview = useCallback(async () => {
     if (!pdfDoc) return;
@@ -1512,22 +1505,15 @@ export default function PdfReviewer() {
                 : "AI 审稿"}
             </button>
 
-            <label className="flex h-10 shrink-0 items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2 shadow-sm dark:border-neutral-700 dark:bg-neutral-950">
-              <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">模型</span>
-              <select
-                value={aiModelId}
-                disabled={aiBusy || !pdfDoc}
-                onChange={(e) => setAiModelId(e.target.value)}
-                className="h-full w-[5.75rem] border-0 bg-transparent py-0 pl-0 pr-4 text-sm text-neutral-900 focus:outline-none focus:ring-0 disabled:opacity-50 dark:text-neutral-100"
-                title="MiniMax 需 MINIMAX_API_KEY；方舟需 ARK_API_KEY；列表见 lib/ai-review-models.ts"
-              >
-                {AI_REVIEW_MODELS.map((m, i) => (
-                  <option key={`ai-opt-${i}-${m.id}`} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div
+              className="flex h-10 shrink-0 items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2.5 shadow-sm dark:border-neutral-700 dark:bg-neutral-950"
+              title="当前固定使用 DeepSeek V4 Flash"
+            >
+              <span className="text-xs text-neutral-500 dark:text-neutral-400">模型</span>
+              <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
+                DeepSeek V4 Flash
+              </span>
+            </div>
 
             <label className="flex h-10 items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2.5 shadow-sm dark:border-neutral-700 dark:bg-neutral-950">
               <span className="shrink-0 text-xs text-neutral-500 dark:text-neutral-400">页数</span>
@@ -1576,7 +1562,7 @@ export default function PdfReviewer() {
             <button
               type="button"
               onClick={() => void openAiReviewSpecModal()}
-              className="inline-flex h-10 shrink-0 items-center rounded-lg border border-orange-100 bg-orange-50/60 px-3 text-sm font-medium text-orange-700/90 shadow-sm transition hover:border-orange-200 hover:bg-orange-50 dark:border-orange-900/35 dark:bg-orange-950/15 dark:text-orange-300/90 dark:hover:border-orange-800/50 dark:hover:bg-orange-950/25"
+              className="inline-flex h-10 shrink-0 items-center rounded-lg border border-orange-100 bg-orange-50/60 px-3 text-sm text-orange-700/90 shadow-sm transition hover:border-orange-200 hover:bg-orange-50 dark:border-orange-900/35 dark:bg-orange-950/15 dark:text-orange-300/90 dark:hover:border-orange-800/50 dark:hover:bg-orange-950/25"
               title="修改审稿规则，仅本次审稿期间有效"
             >
               修改审稿规则
