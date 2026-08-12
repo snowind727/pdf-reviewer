@@ -7,9 +7,12 @@
 1. **配置密钥**  
    复制 `.env.example` 为 **`.env.local`**，然后填写 **`DEEPSEEK_API_KEY`**。当前页面固定使用 `deepseek-v4-flash`。
 
-2. 审稿请求使用 DeepSeek 官方 OpenAI 兼容接口：`POST https://api.deepseek.com/chat/completions`，请求头使用 `Authorization: Bearer <API Key>`，并开启 JSON 输出。
+2. **配置邀请码门禁**  
+   在 `.env.local` 中配置 **`INVITE_CODE`**（支持逗号分隔多个）与 **`GATE_SECRET`**（可用 `openssl rand -hex 32` 生成）。访问页面需先输入邀请码，验证后 30 天内免重复输入；未配置时应用会拒绝访问。生产环境建议通过反向代理启用 HTTPS。
 
-3. `npm install`（会执行 `postinstall`，将 `pdfjs-dist` 复制到 **`public/pdfjs/`**，供浏览器直接加载，避免 Next 打包 pdf.js 崩溃）→ `npm run dev` → 打开 [http://localhost:3000](http://localhost:3000)。若 404，可手动执行：`node scripts/copy-pdfjs.mjs`。
+3. 审稿请求使用 DeepSeek 官方 OpenAI 兼容接口：`POST https://api.deepseek.com/chat/completions`，请求头使用 `Authorization: Bearer <API Key>`，并开启 JSON 输出。
+
+4. `npm install`（会执行 `postinstall`，将 `pdfjs-dist` 复制到 **`public/pdfjs/`**，供浏览器直接加载，避免 Next 打包 pdf.js 崩溃）→ `npm run dev` → 打开 [http://localhost:3000](http://localhost:3000)。若 404，可手动执行：`node scripts/copy-pdfjs.mjs`。
 
 ## 可选：离线中文字体
 
