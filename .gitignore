@@ -44,3 +44,4 @@ public/pdfjs/*.mjs
 next-env.d.ts
 
 .cursor/
+.qoder/
