@@ -168,7 +168,7 @@ export default function PdfReviewer() {
   const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
   const [punctuationReviewMode, setPunctuationReviewMode] =
     useState<PunctuationReviewMode>("ignore");
-  const [batchReviewCount, setBatchReviewCount] = useState(10);
+  const [batchReviewCount, setBatchReviewCount] = useState(5);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
     total: number;
@@ -1652,7 +1652,7 @@ export default function PdfReviewer() {
                 </div>
                 <div className="mt-5 space-y-3">
                   {[
-                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 10 页。",
+                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 5 页。",
                     "审稿页数固定为 1、5、10、20、30；若剩余页数不足，会自动处理到文档末页。",
                     "连续审稿会把多页内容一并发给 AI；当选择页数大于 5 时，会自动按每 5 页分批发送。",
                     "选中文本后可“复制”或直接“AI专审”。",
