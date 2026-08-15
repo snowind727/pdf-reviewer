@@ -269,26 +269,6 @@ function countOccurrences(haystack: string, needle: string): number {
   return n;
 }
 
-export function findExcerptRange(plain: string, excerpt: string): [number, number] | null {
-  const candidates = [
-    excerpt,
-    excerpt.trim(),
-    excerpt.replace(/\s+/g, " ").trim(),
-  ];
-  for (const c of candidates) {
-    if (!c) continue;
-    /** 极短串在全页多次出现时拒绝匹配，防止高亮飘到无关处 */
-    if (c.length <= 2 && countOccurrences(plain, c) > 1) continue;
-    const idx = plain.indexOf(c);
-    if (idx >= 0) {
-      let end = idx + c.length;
-      [, end] = trimRangeEnd(plain, idx, end);
-      return [idx, end];
-    }
-  }
-  return null;
-}
-
 function findAllOccurrences(haystack: string, needle: string): number[] {
   if (!needle) return [];
   const out: number[] = [];
@@ -376,8 +356,7 @@ function scoreOccurrence(
     score += commonPrefixLen(actualRight, expectedRight) * 24;
   }
 
-  // 位置只作为弱 tie-breaker，避免重复命中时随机落到后文。
-  score -= start / Math.max(plain.length, 1);
+  // 位置不参与打分：同分/近分时由 findBestExcerptRange 按 TIE_SCORE_TOLERANCE 取靠前位置。
   return score;
 }
 
@@ -435,6 +414,25 @@ function logExcerptMatchDebug(
   console.table(top);
 }
 
+/**
+ * 同串在页内多处出现、且两者打分差距在该容差以内时，视为"平局"，
+ * 改按出现位置取靠前的一处，确保高亮稳定落在文档更靠前的匹配上。
+ * 容差需小于上下文逐字加分（24/字），避免位置压过真实上下文差异。
+ */
+const SCORE_TIE_TOLERANCE = 20;
+
+function occurrenceBeats(
+  incoming: ScoredOccurrence,
+  current: ScoredOccurrence | null,
+): boolean {
+  if (!current) return true;
+  const diff = incoming.score - current.score;
+  if (diff > SCORE_TIE_TOLERANCE) return true;
+  if (diff < -SCORE_TIE_TOLERANCE) return false;
+  // 落在容差内 → 视为平局，取文档中更靠前的位置
+  return incoming.start < current.start;
+}
+
 function findBestExcerptRange(
   plain: string,
   issue: IssueInput,
@@ -465,7 +463,7 @@ function findBestExcerptRange(
         matched: plain.slice(idx, end),
       };
       ranked.push(scored);
-      if (!best || score > best.score) {
+      if (occurrenceBeats(scored, best)) {
         best = scored;
       }
     }
