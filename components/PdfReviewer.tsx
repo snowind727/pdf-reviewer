@@ -168,7 +168,7 @@ export default function PdfReviewer() {
   const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
   const [punctuationReviewMode, setPunctuationReviewMode] =
     useState<PunctuationReviewMode>("ignore");
-  const [batchReviewCount, setBatchReviewCount] = useState(20);
+  const [batchReviewCount, setBatchReviewCount] = useState(10);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
     total: number;
