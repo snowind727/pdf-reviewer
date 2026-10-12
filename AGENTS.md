@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-这是一个基于 Next.js App Router 的 PDF AI 审稿工具。用户上传 PDF 后，可以按页或按选区调用 AI 审稿，并在 PDF 文本层上定位批注、高亮和导出标注后的 PDF。
+这是一个基于 Next.js App Router 的 PDF AI 审稿工具。用户上传 PDF 后，可以按页或按选区调用 AI 审稿，并在 PDF 文本层上定位批注和高亮。标注 PDF 导出已有实现，但界面入口当前由 `components/PdfReviewer.tsx` 中的 `PDF_EXPORT_ENABLED = false` 关闭。
 
 主要技术栈：Next.js 16、React 19、TypeScript、Tailwind CSS、pdf.js、pdf-lib、fontkit 和 Zod。
 
@@ -15,8 +15,6 @@ npm run lint       # 执行 ESLint 检查
 npm run build      # 执行生产构建
 npm start          # 启动生产服务
 ```
-
-修改代码后，优先运行 `npm run lint`；涉及构建配置、路由、服务端代码或依赖时，再运行 `npm run build`。
 
 ## 目录约定
 
@@ -49,14 +47,23 @@ npm start          # 启动生产服务
 - `INVITE_CODE`
 - `GATE_SECRET`
 
-修改 API 请求格式、模型配置或结构化输出时，同时检查 `lib/deepseek.ts`、`lib/ai-review-models.ts` 以及对应的 `app/api/` 路由。
+当前 `review-page` 和 `suggest-edit` 的 `POST` 入口均调用 DeepSeek。按任务查看相关实现：
 
-## 验证要求
+- 模型调用、请求参数与服务端模型配置：`lib/deepseek.ts`。
+- 批量审稿、选区专审的输入输出：对应的 `app/api/review-page/route.ts`、`app/api/suggest-edit/route.ts`，以及 `lib/review-types.ts`。
+- 默认编辑规范及加载：`editor-spec.md`、`lib/editor-spec.ts`。
+- 旧多模型兼容：仅涉及旧请求兼容或迁移时查看 `lib/ai-review-models.ts`、`lib/minimax-models.ts`、`lib/ark-models.ts`、`lib/volcengine-ark.ts` 与路由中的 `legacyPost`；它们不是当前模型调用入口。
+- 发布：仅在用户要求部署本项目时读取 `docs/deployment.md`。
 
-完成修改后，根据影响范围执行：
+## 验证与完成条件
 
-1. `npm run lint`
-2. 必要时执行 `npm run build`
-3. 如果改动涉及 PDF 交互、门禁或 API 请求，补充手动验证对应用户流程。
+根据改动范围验证：
+
+1. 代码修改运行 `npm run lint`；涉及构建配置、路由、服务端代码或依赖时，补充 `npm run build`。
+2. PDF 交互、门禁或 API 请求变更，验证受影响的用户流程；使用本地样例或模拟响应，不调用真实生产密钥。
+3. 纯文档、指令修改或只读审核，检查内容、引用和改动范围，无需运行 lint 或 build。
+4. 检查通过后，仅在有新改动、验证失败或未解决问题时重跑相关检查。
+
+在已授权范围内完成实现、相关验证及本次改动导致的问题修复；不要在初步实现后提前停止。最终报告验证结果和未验证项。用户明确要求仅审核、先列方案或暂停时，以该要求为完成边界。
 
 不要为了验证而调用真实的生产密钥或提交敏感信息。

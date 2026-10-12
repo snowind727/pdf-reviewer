@@ -168,7 +168,7 @@ export default function PdfReviewer() {
   const [reviewMode, setReviewMode] = useState<ReviewMode>("discover-more");
   const [punctuationReviewMode, setPunctuationReviewMode] =
     useState<PunctuationReviewMode>("ignore");
-  const [batchReviewCount, setBatchReviewCount] = useState(5);
+  const [batchReviewCount, setBatchReviewCount] = useState(20);
   const [batchReviewProgress, setBatchReviewProgress] = useState<{
     done: number;
     total: number;
@@ -1507,11 +1507,11 @@ export default function PdfReviewer() {
 
             <div
               className="flex h-10 shrink-0 items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2.5 shadow-sm dark:border-neutral-700 dark:bg-neutral-950"
-              title="当前固定使用 DeepSeek V4 Flash"
+              title="当前固定使用 deepSeek-flash"
             >
               <span className="text-xs text-neutral-500 dark:text-neutral-400">模型</span>
               <span className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
-                DeepSeek V4 Flash
+                deepSeek-flash
               </span>
             </div>
 
@@ -1652,7 +1652,7 @@ export default function PdfReviewer() {
                 </div>
                 <div className="mt-5 space-y-3">
                   {[
-                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 5 页。",
+                    "上传 PDF 后，可直接用“AI审稿”从当前页开始处理，默认审 20 页。",
                     "审稿页数固定为 1、5、10、20、30；若剩余页数不足，会自动处理到文档末页。",
                     "连续审稿会把多页内容一并发给 AI；当选择页数大于 5 时，会自动按每 5 页分批发送。",
                     "选中文本后可“复制”或直接“AI专审”。",
